@@ -19,10 +19,11 @@ Output files (in this directory):
 import json
 import os
 import time
-import requests
 import lseg.data as ld
 from dotenv import load_dotenv
 import pandas as pd
+
+from lseg_rest_api import LSEGRestClient
 
 load_dotenv()
 
@@ -47,9 +48,8 @@ with open(config_path, "w") as f:
     json.dump(config, f, indent=4)
 
 session = ld.open_session(config_name=config_path)
-token = session._access_token
+rest = LSEGRestClient(session)
 
-SYMBOLOGY_URL = "https://api.refinitiv.com/discovery/symbology/v1/lookup"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ---------------------------------------------------------------------------
@@ -223,38 +223,6 @@ print("\n" + "=" * 80)
 print("PHASE 4: showHistory for matched securities")
 print("=" * 80)
 
-auth_headers = {
-    "Authorization": f"Bearer {token}",
-    "Content-Type": "application/json"
-}
-
-def get_ric_history_by_isin(isin: str) -> list[dict]:
-    """Return list of {RIC, effectiveFrom, effectiveTo} for a given ISIN."""
-    payload = {
-        "from": [{"identifierTypes": ["ISIN"], "values": [isin]}],
-        "to": [{"identifierTypes": ["RIC"]}],
-        "type": "predefined",
-        "route": "FindPrimaryRIC",
-        "showHistory": True
-    }
-    resp = requests.post(SYMBOLOGY_URL, headers=auth_headers, json=payload)
-    if resp.status_code != 200:
-        print(f"  HTTP {resp.status_code} for ISIN {isin}")
-        return []
-    data = resp.json()
-    rows = []
-    for item in data.get("data", []):
-        for out in item.get("output", []):
-            for match in out.get("value", []):
-                rows.append({
-                    "isin": isin,
-                    "ric": match.get("value"),
-                    "effective_from": match.get("effectiveFrom"),
-                    "effective_to": match.get("effectiveTo"),
-                })
-    return rows
-
-# Test with a few known ISINs
 test_isins = {
     "META": "US30303M1027",
     "AAPL": "US0378331005",
@@ -262,17 +230,22 @@ test_isins = {
     "JPM":  "US46625H1005",
 }
 
-history_rows = []
+all_history = []
 for name, isin in test_isins.items():
     print(f"\n  {name} ({isin}):")
-    rows = get_ric_history_by_isin(isin)
-    for r in rows:
-        print(f"    {r['ric']:20s}  {r['effective_from']}  ->  {r['effective_to']}")
-    history_rows.extend(rows)
+    df = rest.symbology_lookup_df(
+        identifiers=[isin],
+        from_types=["ISIN"],
+        route="FindPrimaryRIC",
+        show_history=True,
+    )
+    for _, r in df.iterrows():
+        print(f"    {r['value']:20s}  {r['effective_from']}  ->  {r['effective_to']}")
+    all_history.append(df)
     time.sleep(0.2)  # gentle rate limiting
 
-if history_rows:
-    hist_df = pd.DataFrame(history_rows)
+if all_history:
+    hist_df = pd.concat(all_history, ignore_index=True)
     hist_df.to_csv(os.path.join(SCRIPT_DIR, "secmaster_ric_history.csv"), index=False)
     print(f"\nSaved: secmaster_ric_history.csv ({len(hist_df)} rows)")
 
