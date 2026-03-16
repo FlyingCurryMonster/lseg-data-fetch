@@ -152,19 +152,52 @@ class LSEGRestClient:
             identifier, value, effective_from, effective_to
 
         See symbology_lookup() for parameter docs.
+
+        Note: With show_history=True, each data item is a flat dict:
+            {input: [{value, identifierType}],
+             output: [{value, identifierType}],
+             effectiveFrom: ..., effectiveTo: ...}
+        Without show_history, output may contain a list of matches.
+        This method handles both formats.
         """
         data = self.symbology_lookup(**kwargs)
         rows = []
         for item in data.get("data", []):
-            identifier = item.get("input", [{}])[0].get("value", "")
-            for out in item.get("output", []):
-                for match in out.get("value", []):
+            input_list = item.get("input", [])
+            identifier = input_list[0].get("value", "") if input_list else ""
+
+            output_list = item.get("output", [])
+            # With showHistory: effectiveFrom/To are at the item level
+            effective_from = item.get("effectiveFrom")
+            effective_to = item.get("effectiveTo")
+
+            for out in output_list:
+                if isinstance(out, dict) and "identifierType" in out:
+                    # showHistory format: output is [{value, identifierType}]
                     rows.append({
                         "identifier": identifier,
-                        "value": match.get("value"),
-                        "effective_from": match.get("effectiveFrom"),
-                        "effective_to": match.get("effectiveTo"),
+                        "value": out.get("value"),
+                        "effective_from": effective_from,
+                        "effective_to": effective_to,
                     })
+                elif isinstance(out, dict) and "value" in out:
+                    # Non-history format: output has nested value list
+                    for match in out.get("value", []):
+                        if isinstance(match, dict):
+                            rows.append({
+                                "identifier": identifier,
+                                "value": match.get("value"),
+                                "effective_from": match.get("effectiveFrom"),
+                                "effective_to": match.get("effectiveTo"),
+                            })
+                        else:
+                            rows.append({
+                                "identifier": identifier,
+                                "value": match,
+                                "effective_from": None,
+                                "effective_to": None,
+                            })
+
         return pd.DataFrame(rows) if rows else pd.DataFrame(
             columns=["identifier", "value", "effective_from", "effective_to"]
         )
