@@ -1,6 +1,11 @@
 """
-Retry failed FEXD futures from the first download.
-Append results to futures_daily_prices.csv
+Download daily pricing data for all dividend futures in the instrument master.
+
+Reads: instrument_master_futures.csv
+Output: futures_daily_prices.csv, failed_rics_futures.csv (if any failures)
+
+Fields: all available (no fields param — API returns everything it has)
+History: as far back as API allows, up to today
 """
 
 import json
@@ -32,32 +37,30 @@ with open(config_path, "w") as f:
 
 ld.open_session(config_name=config_path)
 
-# Failed RICs from first run
-failed_rics = [
-    'FEXDH26', 'FEXDH27', 'FEXDM26', 'FEXDM27', 'FEXDU26',
-    'FEXDZ0^2', 'FEXDZ25^2', 'FEXDZ26', 'FEXDZ27', 'FEXDZ28',
-    'FEXDZ29', 'FEXDZ2^2', 'FEXDZ33', 'FEXDZ34', 'FEXDZ35'
-]
+# Load instrument master
+master = pd.read_csv("instrument_master_futures.csv")
+all_rics = master["RIC"].tolist()
+print(f"Total futures to download: {len(all_rics)}")
+print(f"  SDA: {(master['product'] == 'SDA').sum()}")
+print(f"  SDI: {(master['product'] == 'SDI').sum()}")
+print(f"  FEXD: {(master['product'] == 'FEXD').sum()}")
 
 end = datetime.now().strftime("%Y-%m-%d")
 start = "2005-01-01"
-fields = ["TRDPRC_1", "HIGH_1", "LOW_1", "OPEN_PRC", "SETTLE", "ACVOL_UNS"]
-
-master = pd.read_csv("instrument_master_futures.csv")
 
 all_data = []
-still_failed = []
+failed_rics = []
 
-# Try in smaller batches with longer delays to avoid rate limits
 BATCH_SIZE = 3
-for i in range(0, len(failed_rics), BATCH_SIZE):
-    batch = failed_rics[i:i + BATCH_SIZE]
-    print(f"\nRetrying: {batch}")
+for i in range(0, len(all_rics), BATCH_SIZE):
+    batch = all_rics[i:i + BATCH_SIZE]
+    batch_num = i // BATCH_SIZE + 1
+    total_batches = (len(all_rics) + BATCH_SIZE - 1) // BATCH_SIZE
+    print(f"\nBatch {batch_num}/{total_batches}: {batch}")
 
     try:
         data = ld.get_history(
             universe=batch,
-            fields=fields,
             start=start,
             end=end
         )
@@ -71,6 +74,9 @@ for i in range(0, len(failed_rics), BATCH_SIZE):
                         ric_data["RIC"] = ric
                         ric_data.index.name = "date"
                         frames.append(ric_data.reset_index())
+                    else:
+                        print(f"  WARNING: {ric} not in response columns")
+                        failed_rics.append(ric)
                 if frames:
                     batch_df = pd.concat(frames, ignore_index=True)
                     all_data.append(batch_df)
@@ -82,42 +88,49 @@ for i in range(0, len(failed_rics), BATCH_SIZE):
                 print(f"  Got {len(data)} rows for {batch[0]}")
         else:
             print(f"  No data returned")
-            still_failed.extend(batch)
+            failed_rics.extend(batch)
 
     except Exception as e:
         print(f"  ERROR: {e}")
-        still_failed.extend(batch)
+        failed_rics.extend(batch)
 
-    time.sleep(5)  # longer delay to avoid rate limiting
+    time.sleep(5)
 
+# Combine all data
 if all_data:
-    new_data = pd.concat(all_data, ignore_index=True)
-    new_data = new_data.merge(master[["RIC", "product", "status"]], on="RIC", how="left")
+    result = pd.concat(all_data, ignore_index=True)
+    result = result.merge(master[["RIC", "product", "status"]], on="RIC", how="left")
+    result = result.sort_values(["product", "RIC", "date"]).reset_index(drop=True)
 
-    # Load existing data and append
-    existing = pd.read_csv("futures_daily_prices.csv")
-    combined = pd.concat([existing, new_data], ignore_index=True)
-    combined = combined.drop_duplicates(subset=["RIC", "date"])
-    combined = combined.sort_values(["product", "RIC", "date"]).reset_index(drop=True)
-
-    print(f"\n=== RESULT ===")
-    print(f"New rows: {len(new_data)}")
-    print(f"Total rows after merge: {len(combined)}")
-    print(f"Unique RICs: {combined['RIC'].nunique()}")
+    print("\n" + "=" * 80)
+    print("DOWNLOAD COMPLETE")
+    print("=" * 80)
+    print(f"Total rows: {len(result)}")
+    print(f"Total columns: {len(result.columns)}")
+    print(f"Columns: {list(result.columns)}")
+    print(f"Unique RICs with data: {result['RIC'].nunique()}")
     print(f"\nBy product:")
-    combined["date"] = pd.to_datetime(combined["date"])
+    result["date"] = pd.to_datetime(result["date"])
     for product in ["SDA", "SDI", "FEXD"]:
-        subset = combined[combined["product"] == product]
+        subset = result[result["product"] == product]
         if not subset.empty:
             print(f"  {product}: {subset['RIC'].nunique()} RICs, {len(subset)} rows, "
                   f"dates: {subset['date'].min()} to {subset['date'].max()}")
 
-    print(f"\nStill failed ({len(still_failed)}): {still_failed}")
-
-    combined.to_csv("futures_daily_prices.csv", index=False)
+    result.to_csv("futures_daily_prices.csv", index=False)
     print(f"\nSaved to futures_daily_prices.csv")
 else:
-    print(f"\nAll retries failed: {still_failed}")
+    print("\nNo data downloaded!")
+
+# Handle failed RICs
+if failed_rics:
+    failed_df = pd.DataFrame({"RIC": failed_rics})
+    failed_df = failed_df.merge(master[["RIC", "product", "status"]], on="RIC", how="left")
+    failed_df.to_csv("failed_rics_futures.csv", index=False)
+    print(f"\nFailed RICs ({len(failed_rics)}): {failed_rics}")
+    print("Saved to failed_rics_futures.csv")
+else:
+    print("\nNo failed RICs!")
 
 ld.close_session()
 os.remove(config_path)
