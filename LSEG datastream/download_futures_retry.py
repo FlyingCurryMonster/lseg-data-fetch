@@ -89,7 +89,7 @@ for i in range(0, len(all_rics), BATCH_SIZE):
         else:
             print(f"  No data returned")
             failed_rics.extend(batch)
-
+    
     except Exception as e:
         print(f"  ERROR: {e}")
         failed_rics.extend(batch)
