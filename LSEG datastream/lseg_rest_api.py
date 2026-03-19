@@ -213,7 +213,7 @@ class LSEGRestClient:
         select: str | None = None,
         top: int = 10,
         navigators: str | None = None,
-        view: str | None = None,
+        view: str = "SearchAll",
     ) -> dict:
         """Search for instruments via the Discovery Search REST API.
 
@@ -229,10 +229,18 @@ class LSEGRestClient:
                         (e.g., "RIC,DocumentTitle,ExpiryDate,AssetState").
             top:        Max number of results (default 10).
             navigators: Aggregation/grouping expression.
-            view:       Search view (e.g., "DERIVATIVE_QUOTES", "EQUITY_QUOTES").
+            view:       Search view (required by the API, default "SearchAll").
+                        Valid values: SearchAll, DerivativeQuotes,
+                        DerivativeInstruments, EquityQuotes, EquityInstruments,
+                        EquityDerivativeQuotes, EquityDerivativeInstruments,
+                        BondFutOptQuotes, CommodityQuotes, FixedIncomeQuotes,
+                        FundQuotes, IndexQuotes, Quotes, Instruments,
+                        and others (see API docs for full list).
 
         Returns:
-            Raw JSON response dict from the API.
+            Raw JSON response dict from the API. Key fields:
+              - "Total": total number of matching results
+              - "Hits": list of result dicts with requested fields
 
         API endpoint:
             POST https://api.refinitiv.com/discovery/search/v1/
@@ -245,6 +253,7 @@ class LSEGRestClient:
         """
         payload = {
             "Query": query,
+            "View": view,
             "Top": top,
         }
         if filter:
@@ -253,8 +262,6 @@ class LSEGRestClient:
             payload["Select"] = select
         if navigators:
             payload["Navigators"] = navigators
-        if view:
-            payload["View"] = view
 
         resp = self._post(self.SEARCH_URL, payload)
         resp.raise_for_status()

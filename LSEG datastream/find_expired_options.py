@@ -75,7 +75,7 @@ queries = [
         "filter": "AssetState eq 'DC'",
         "select": "RIC,DocumentTitle,ExpiryDate,AssetState,StrikePrice,PutCallIndicator",
         "top": 100,
-        "view": "DERIVATIVE_QUOTES",
+        "view": "DerivativeQuotes",
     },
     {
         "label": "SDA expired options — by past expiry date",
