@@ -71,6 +71,29 @@ Measured on active SPY options as of March 2026:
 
 For longer tick history, LSEG Tick History (RTH) is a separate product.
 
+## API Rate Limits
+
+Official limits per LSEG developer community (as of 2025):
+
+| Endpoint | Burst Limit | Rate Limit |
+|----------|-------------|------------|
+| `GET events` (trade/quote ticks) | 25 req/sec | 25 req/sec |
+| `GET intraday-summaries` (1-min bars) | 25 req/sec | 25 req/sec |
+| `GET interday-summaries` (daily bars) | 50 req/sec | 50 req/sec |
+| `GET single-event` | 75 req/sec | 75 req/sec |
+| `POST events` | 4 req/sec | 4 req/sec |
+
+Exceeding limits returns HTTP 429 "Too many requests, please try again later."
+
+**Current script behavior**: `TICK_SLEEP = 0.5s` → ~2 req/sec, only 8% of the 25 req/sec limit.
+
+**Optimization potential**:
+- Reduce sleep to ~0.05s for ~20 req/sec sequential (10x speedup)
+- Add thread pool (8-10 workers) with a token bucket to parallelize across RICs while staying under 25 req/sec
+- Adaptive backoff on 429s rather than fixed conservative sleep
+
+Sources: [LSEG Dev Community — rate limit thread](https://community.developers.lseg.com/discussion/116360), [events API rate limit](https://community.developers.lseg.com/discussion/132043)
+
 ## Expired Option RICs
 
 Expired options are **not discoverable** via Discovery Search (`AssetState eq 'DC'` returns 0 results for options). Chain functions also don't return expired options.
@@ -104,9 +127,36 @@ Tested on multiple expired contracts (as of March 2026):
 ### Daily bar columns (expired options, interday-summaries)
 `DATE, TRDPRC_1, OPEN_PRC, HIGH_1, LOW_1, ACVOL_UNS, BID, ASK, OPINT_1, MID_PRICE, IMP_VOLT, IMP_VOLTA, IMP_VOLTB, ASK_INDCTV, BID_INDCTV, DELTA, GAMMA, VEGA, RHO, THEO_VALUE, THETA, PCTCHNG, NETCHNG_1`
 
+### Constructing the expired RIC suffix
+
+The suffix format is `^<month_code><YY>` where month codes match option call codes:
+A=Jan, B=Feb, C=Mar, D=Apr, E=May, F=Jun, G=Jul, H=Aug, I=Sep, J=Oct, K=Nov, L=Dec
+
+This applies to both calls and puts — the suffix uses the expiry month only, not the C/P code.
+
+To construct an expired RIC programmatically from an active RIC and expiry date:
+```python
+MONTH_CODES = 'ABCDEFGHIJKL'
+def make_expired_ric(ric, expiry_date):
+    # expiry_date: 'YYYY-MM-DD'
+    month = int(expiry_date[5:7])
+    year = expiry_date[2:4]
+    suffix = f"^{MONTH_CODES[month-1]}{year}"
+    return ric + suffix
+# e.g. 'NVDAC162618500.U' + expiry '2026-03-16' → 'NVDAC162618500.U^C26'
+```
+
+### Key bug: download_minute_bars.py uses active RIC format for expired contracts
+
+When fetching 1-min bars, expired contracts return 0 bars if queried with the active RIC (e.g., `NVDAC162618500.U`). The API returns 200 but empty data. The expired suffix must be appended (e.g., `NVDAC162618500.U^C26`).
+
+**Fix needed in download_minute_bars.py**: Compare each contract's expiry date to today. If expired, append the `^<month_code><YY>` suffix before querying intraday-summaries. The expiry date is available in `option_contracts.csv`.
+
+This was discovered during the first test run of download_minute_bars.py on NVDA (March 20, 2026) — Mar 16 2026 contracts showed 0 bars with the active RIC.
+
 ### Open questions
-- Do Jan/Feb/Mar 2026 expired options use different suffix conventions? (`^A26`, `^B26`, `^C26` returned no data — possibly not yet flagged as expired in LSEG's system, or may use futures month codes F/G/H)
-- Can we use OptionMetrics contract lists as a source of truth to construct expired RICs programmatically?
+- Jan/Feb/Mar 2026 expired options: `^A26`, `^B26`, `^C26` suffix not yet tested with the corrected understanding above (previously tested without suffix). Need to retest.
+- Can we use OptionMetrics contract lists as a source of truth to construct expired RICs for contracts we didn't discover ourselves?
 
 ## Option RIC Format (US equities, OPRA)
 
