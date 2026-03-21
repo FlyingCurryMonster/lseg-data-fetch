@@ -2,16 +2,17 @@
 Download trade and quote tick data for all active options on a given underlying.
 
 Usage:
-  python download_option_ticks.py TICKER [MODE]
+  python download_option_ticks.py TICKER [MODE] [WORKERS]
 
-  TICKER: SPY, NVDA, AMD, TSLA, etc.
-  MODE:   all (default), discover, trades, quotes
+  TICKER:  SPY, NVDA, AMD, TSLA, etc.
+  MODE:    all (default), discover, trades, quotes
+  WORKERS: parallel workers (default: 8)
 
 Examples:
-  python download_option_ticks.py NVDA              # discover + trades + quotes
+  python download_option_ticks.py NVDA              # discover + trades
   python download_option_ticks.py AMD trades        # trade ticks only
   python download_option_ticks.py TSLA discover     # discover contracts only
-  python download_option_ticks.py SPY quotes        # quote ticks only
+  python download_option_ticks.py SPY trades 12     # trade ticks, 12 workers
 
 Resume: The script reads {TICKER}/download_log.jsonl to skip completed (ric, type) pairs.
         Kill and restart safely at any time — network errors are retried automatically.
@@ -21,6 +22,7 @@ Output directory: {TICKER}/
   trade_ticks.csv        — trade tick data
   quote_ticks.csv        — quote tick data
   download_log.jsonl     — per-contract completion log (also used for resume)
+  ticks_progress.log     — timestamped throughput log
 """
 
 import csv
@@ -28,6 +30,9 @@ import json
 import os
 import sys
 import time
+import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import lseg.data as ld
@@ -39,9 +44,6 @@ load_dotenv()
 # =====================================================================
 # Ticker config
 # =====================================================================
-# Map ticker to the Discovery Search filter needed.
-# SPY is special: needs AssetCategory filter because UnderlyingQuoteRIC has no suffix.
-# Most US equities use .O (Nasdaq) or .N (NYSE).
 UNDERLYING_MAP = {
     "SPY": ("UnderlyingQuoteRIC eq 'SPY' and AssetCategory eq 'EIO'", "SPY.P"),
     "NVDA": ("UnderlyingQuoteRIC eq 'NVDA.O'", "NVDA.O"),
@@ -60,13 +62,17 @@ UNDERLYING_MAP = {
 # Constants
 # =====================================================================
 SEARCH_URL = "https://api.refinitiv.com/discovery/search/v1/"
-HIST_URL = "https://api.refinitiv.com/data/historical-pricing/v1/views"
+HIST_URL   = "https://api.refinitiv.com/data/historical-pricing/v1/views"
 
-TICK_BATCH_SIZE = 10000
-SEARCH_SLEEP = 0.3
-TICK_SLEEP = 0.5
-SUMMARY_INTERVAL = 100
-MAX_RETRIES = 5
+TICK_BATCH_SIZE    = 10000
+SUMMARY_INTERVAL   = 500
+PROGRESS_INTERVAL  = 60       # seconds between progress log entries
+MAX_RETRIES        = 5
+
+INITIAL_RATE  = 23.0   # req/sec starting rate (events endpoint cap is 25)
+RATE_BACKOFF  = 0.90   # multiply rate by this on each 429
+MIN_RATE      = 0.5    # floor
+DEFAULT_WORKERS = 8
 
 TRADE_FIELDS = [
     "DATE_TIME", "EVENT_TYPE", "RTL", "SOURCE_DATETIME", "SEQNUM",
@@ -84,7 +90,38 @@ QUOTE_FIELDS = [
 
 
 # =====================================================================
-# Session management
+# Adaptive rate limiter (token bucket)
+# =====================================================================
+class AdaptiveRateLimiter:
+    def __init__(self, initial_rate=INITIAL_RATE):
+        self._lock   = threading.Lock()
+        self._rate   = initial_rate
+        self._tokens = initial_rate
+        self._last   = time.monotonic()
+
+    def acquire(self):
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last
+                self._tokens = min(self._rate, self._tokens + elapsed * self._rate)
+                self._last = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+            time.sleep(0.005)
+
+    def on_429(self):
+        with self._lock:
+            self._rate = max(MIN_RATE, self._rate * RATE_BACKOFF)
+
+    def current_rate(self):
+        with self._lock:
+            return self._rate
+
+
+# =====================================================================
+# Session / token management (thread-safe)
 # =====================================================================
 def setup_session(base_dir):
     config = {
@@ -92,9 +129,9 @@ def setup_session(base_dir):
             "default": "platform.rdp",
             "platform": {
                 "rdp": {
-                    "app-key": os.getenv("DSWS_APPKEY"),
-                    "username": os.getenv("DSWS_USERNAME"),
-                    "password": os.getenv("DSWS_PASSWORD"),
+                    "app-key":        os.getenv("DSWS_APPKEY"),
+                    "username":       os.getenv("DSWS_USERNAME"),
+                    "password":       os.getenv("DSWS_PASSWORD"),
                     "signon_control": True,
                 }
             },
@@ -109,38 +146,53 @@ def setup_session(base_dir):
 
 class TokenManager:
     def __init__(self, session):
-        self.session = session
-        self.token = session._access_token
+        self._session = session
+        self._token   = session._access_token
+        self._lock    = threading.Lock()
 
-    def headers(self):
+    def _headers(self):
         return {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type":  "application/json",
         }
 
-    def refresh(self):
-        self.token = self.session._access_token
+    def _refresh(self):
+        with self._lock:
+            self._token = self._session._access_token
 
-    def _request_with_retry(self, method, url, **kwargs):
+    def _request_with_retry(self, method, url, rate_limiter=None, **kwargs):
         for attempt in range(MAX_RETRIES):
+            if rate_limiter:
+                rate_limiter.acquire()
             try:
-                resp = method(url, headers=self.headers(), **kwargs)
+                resp = method(url, headers=self._headers(), **kwargs)
                 if resp.status_code == 401:
-                    self.refresh()
-                    resp = method(url, headers=self.headers(), **kwargs)
+                    self._refresh()
+                    resp = method(url, headers=self._headers(), **kwargs)
+                if resp.status_code == 429:
+                    if rate_limiter:
+                        rate_limiter.on_429()
+                    retry_after = int(resp.headers.get("Retry-After", 5))
+                    time.sleep(retry_after)
+                    continue
                 return resp
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
                 wait = min(60, 2 ** attempt * 5)
-                print(f"    Network error (attempt {attempt+1}/{MAX_RETRIES}): {type(e).__name__}")
-                print(f"    Retrying in {wait}s...")
                 time.sleep(wait)
-        raise requests.exceptions.ConnectionError(f"Failed after {MAX_RETRIES} retries for {url}")
+        raise requests.exceptions.ConnectionError(
+            f"Failed after {MAX_RETRIES} retries for {url}"
+        )
 
-    def post(self, url, payload):
-        return self._request_with_retry(requests.post, url, json=payload)
+    def post(self, url, payload, rate_limiter=None):
+        return self._request_with_retry(
+            requests.post, url, rate_limiter=rate_limiter, json=payload
+        )
 
-    def get(self, url, params=None):
-        return self._request_with_retry(requests.get, url, params=params)
+    def get(self, url, params=None, rate_limiter=None):
+        return self._request_with_retry(
+            requests.get, url, rate_limiter=rate_limiter, params=params
+        )
 
 
 # =====================================================================
@@ -158,15 +210,13 @@ def is_standard_opra_ric(ric):
     return True
 
 
-def discover_contracts(tm, ticker, base_filter, contracts_csv):
-    """Discover all active OPRA option contracts via Discovery Search."""
+def discover_contracts(tm, ticker, base_filter, contracts_csv, rate_limiter):
     print("=" * 70)
     print(f"STEP 1: DISCOVERING {ticker} OPTION CONTRACTS")
     print("=" * 70)
 
     search_filter = f"{base_filter} and AssetState eq 'AC'"
 
-    # Get expiry buckets via navigators
     resp = tm.post(SEARCH_URL, {
         "Query": "",
         "View": "EquityDerivativeQuotes",
@@ -174,22 +224,19 @@ def discover_contracts(tm, ticker, base_filter, contracts_csv):
         "Filter": search_filter,
         "Top": 1,
         "Navigators": "ExpiryDate(buckets:100)",
-    })
+    }, rate_limiter=rate_limiter)
     resp.raise_for_status()
-    data = resp.json()
-    total = data.get("Total", 0)
+    data    = resp.json()
+    total   = data.get("Total", 0)
     buckets = data.get("Navigators", {}).get("ExpiryDate", {}).get("Buckets", [])
     print(f"  Total contracts in search: {total}")
     print(f"  Expiry buckets: {len(buckets)}")
 
-    # For each bucket, paginate to get all contracts
     all_contracts = []
-
     for bi, bucket in enumerate(buckets):
         bucket_filter = bucket.get("Filter", "")
-        bucket_label = bucket.get("Label", "?")
-        bucket_count = bucket.get("Count", 0)
-
+        bucket_label  = bucket.get("Label", "?")
+        bucket_count  = bucket.get("Count", 0)
         if not bucket_filter:
             continue
 
@@ -205,7 +252,7 @@ def discover_contracts(tm, ticker, base_filter, contracts_csv):
                 "Filter": combined_filter,
                 "Top": 100,
                 "Skip": skip,
-            })
+            }, rate_limiter=rate_limiter)
             if resp.status_code != 200:
                 print(f"  ERROR on bucket {bucket_label} skip={skip}: {resp.status_code}")
                 break
@@ -218,44 +265,36 @@ def discover_contracts(tm, ticker, base_filter, contracts_csv):
                 ric = h.get("RIC", "")
                 if is_standard_opra_ric(ric):
                     bucket_rics.append({
-                        "ric": ric,
+                        "ric":    ric,
                         "expiry": h.get("ExpiryDate", "")[:10],
                         "strike": h.get("StrikePrice"),
-                        "cp": h.get("CallPutOption"),
+                        "cp":     h.get("CallPutOption"),
                     })
-
             skip += len(hits)
-            time.sleep(SEARCH_SLEEP)
 
         all_contracts.extend(bucket_rics)
-        print(f"  Bucket {bi+1}/{len(buckets)}: {bucket_label} — {len(bucket_rics)} OPRA options (running total: {len(all_contracts)})")
+        print(f"  Bucket {bi+1}/{len(buckets)}: {bucket_label} — "
+              f"{len(bucket_rics)} OPRA options (running total: {len(all_contracts)})")
 
-    # Deduplicate by RIC
-    seen = set()
+    seen   = set()
     deduped = []
     for c in all_contracts:
         if c["ric"] not in seen:
             seen.add(c["ric"])
             deduped.append(c)
-    all_contracts = deduped
 
-    # Save
     with open(contracts_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["ric", "expiry", "strike", "cp"])
         writer.writeheader()
-        writer.writerows(all_contracts)
+        writer.writerows(deduped)
 
-    print(f"\n  Saved {len(all_contracts)} unique contracts to {contracts_csv}")
-    return all_contracts
+    print(f"\n  Saved {len(deduped)} unique contracts to {contracts_csv}")
+    return deduped
 
 
 def load_contracts(contracts_csv):
-    contracts = []
     with open(contracts_csv, "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            contracts.append(row)
-    return contracts
+        return list(csv.DictReader(f))
 
 
 # =====================================================================
@@ -263,55 +302,40 @@ def load_contracts(contracts_csv):
 # =====================================================================
 def load_completed(log_file):
     completed = set()
-    if os.path.exists(log_file):
-        with open(log_file, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                    completed.add((entry["ric"], entry["type"]))
-                except (json.JSONDecodeError, KeyError):
-                    continue
+    if not os.path.exists(log_file):
+        return completed
+    with open(log_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                completed.add((entry["ric"], entry["type"]))
+            except (json.JSONDecodeError, KeyError):
+                continue
     return completed
 
 
-def log_completion(log_file, ric, tick_type, ticks, earliest, latest, num_requests, elapsed):
-    entry = {
-        "ric": ric,
-        "type": tick_type,
-        "ticks": ticks,
-        "earliest": earliest,
-        "latest": latest,
-        "requests": num_requests,
-        "elapsed_s": round(elapsed, 2),
-        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-    with open(log_file, "a") as f:
-        f.write(json.dumps(entry) + "\n")
-
-
 # =====================================================================
-# Tick download
+# Tick download (single contract, called from worker threads)
 # =====================================================================
-def download_ticks_for_ric(tm, ric, event_type):
+def download_ticks_for_ric(tm, ric, event_type, rate_limiter):
     url = f"{HIST_URL}/events/{ric}"
-    all_rows = []
+    all_rows   = []
     field_names = None
     num_requests = 0
-    end_param = None
+    end_param   = None
 
     while True:
         params = {"count": str(TICK_BATCH_SIZE), "eventTypes": event_type}
         if end_param:
             params["end"] = end_param
 
-        resp = tm.get(url, params=params)
+        resp = tm.get(url, params=params, rate_limiter=rate_limiter)
         num_requests += 1
 
         if resp.status_code != 200:
-            print(f"    API error {resp.status_code} for {ric}: {resp.text[:200]}")
             break
 
         data = resp.json()
@@ -331,122 +355,188 @@ def download_ticks_for_ric(tm, ric, event_type):
             break
 
         end_param = batch_rows[-1][0]
-        time.sleep(TICK_SLEEP)
 
     earliest = all_rows[-1][0][:19] if all_rows else ""
-    latest = all_rows[0][0][:19] if all_rows else ""
-
+    latest   = all_rows[0][0][:19]  if all_rows else ""
     return all_rows, field_names, num_requests, earliest, latest
 
 
-def get_csv_size(path):
-    if os.path.exists(path):
-        return os.path.getsize(path) / (1024 * 1024)
-    return 0.0
-
-
-def download_all_ticks(tm, contracts, tick_type, csv_path, field_names_expected, log_file, ticker):
-    completed = load_completed(log_file)
-    remaining = [(i, c) for i, c in enumerate(contracts)
-                 if (c["ric"], tick_type) not in completed]
+# =====================================================================
+# Parallel tick downloader
+# =====================================================================
+def download_all_ticks(tm, contracts, tick_type, csv_path, field_names_expected,
+                       log_file, ticker, workers):
+    completed  = load_completed(log_file)
+    remaining  = [(i, c) for i, c in enumerate(contracts)
+                  if (c["ric"], tick_type) not in completed]
 
     total_contracts = len(contracts)
-    already_done = total_contracts - len(remaining)
+    already_done    = total_contracts - len(remaining)
 
     print(f"\n{'=' * 70}")
-    print(f"[{ticker}] DOWNLOADING {tick_type.upper()} TICKS")
+    print(f"[{ticker}] DOWNLOADING {tick_type.upper()} TICKS  (workers={workers})")
     print(f"{'=' * 70}")
-    print(f"  Total contracts: {total_contracts}")
+    print(f"  Total contracts:   {total_contracts}")
     print(f"  Already completed: {already_done}")
-    print(f"  Remaining: {len(remaining)}")
+    print(f"  Remaining:         {len(remaining)}")
 
     if not remaining:
         print("  Nothing to do!")
         return
 
+    rate_limiter = AdaptiveRateLimiter(INITIAL_RATE)
+
+    # Thread-safe shared state
+    csv_lock  = threading.Lock()
+    log_lock  = threading.Lock()
+    stat_lock = threading.Lock()
+
+    stats = {
+        "total_ticks":        0,
+        "contracts_with_data": 0,
+        "contracts_empty":    0,
+        "total_requests":     0,
+        "total_429s":         0,
+        "global_earliest":    None,
+        "global_latest":      None,
+        "done_count":         already_done,
+    }
+
+    progress_log_path = os.path.join(os.path.dirname(csv_path), "ticks_progress.log")
+    start_time        = time.time()
+
     write_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
-
-    total_ticks = 0
-    contracts_with_data = 0
-    contracts_empty = 0
-    global_earliest = None
-    global_latest = None
-    start_time = time.time()
-
-    csv_file = open(csv_path, "a", newline="")
-    writer = csv.writer(csv_file)
+    csv_file     = open(csv_path, "a", newline="")
+    csv_writer   = csv.writer(csv_file)
     if write_header:
-        writer.writerow(["ric"] + field_names_expected)
+        csv_writer.writerow(["ric"] + field_names_expected)
+
+    def worker_task(orig_idx, contract):
+        ric = contract["ric"]
+        t0  = time.time()
+        rows, field_names, num_reqs, earliest, latest = download_ticks_for_ric(
+            tm, ric, tick_type, rate_limiter
+        )
+        elapsed = time.time() - t0
+        return ric, rows, num_reqs, earliest, latest, elapsed
+
+    def progress_logger():
+        while not stop_progress.is_set():
+            time.sleep(PROGRESS_INTERVAL)
+            if stop_progress.is_set():
+                break
+            elapsed = time.time() - start_time
+            with stat_lock:
+                done  = stats["done_count"]
+                ticks = stats["total_ticks"]
+                reqs  = stats["total_requests"]
+            rate  = rate_limiter.current_rate()
+            csv_mb = os.path.getsize(csv_path) / (1024 * 1024) if os.path.exists(csv_path) else 0
+            line = (
+                f"\n[{datetime.utcnow():%Y-%m-%d %H:%M:%S}Z] "
+                f"{ticker} {tick_type} ticks\n"
+                f"  Progress:        {done}/{total_contracts} contracts\n"
+                f"  Total ticks:     {ticks:,}\n"
+                f"  Total requests:  {reqs:,}\n"
+                f"  Elapsed:         {elapsed/3600:.2f}h\n"
+                f"  Current rate:    {rate:.1f} req/sec\n"
+                f"  CSV size:        {csv_mb:.1f} MB\n"
+            )
+            print(line, flush=True)
+            with open(progress_log_path, "a") as pf:
+                pf.write(line)
+
+    stop_progress = threading.Event()
+    progress_thread = threading.Thread(target=progress_logger, daemon=True)
+    progress_thread.start()
 
     try:
-        for progress_idx, (orig_idx, contract) in enumerate(remaining):
-            ric = contract["ric"]
-            t0 = time.time()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(worker_task, orig_idx, contract): (orig_idx, contract)
+                for orig_idx, contract in remaining
+            }
 
-            rows, field_names, num_requests, earliest, latest = download_ticks_for_ric(
-                tm, ric, tick_type
-            )
+            for future in as_completed(futures):
+                orig_idx, contract = futures[future]
+                try:
+                    ric, rows, num_reqs, earliest, latest, elapsed = future.result()
+                except Exception as e:
+                    ric = contract["ric"]
+                    print(f"  ERROR {ric}: {e}")
+                    rows, num_reqs, earliest, latest, elapsed = [], 0, "", "", 0.0
 
-            elapsed = time.time() - t0
-            n_ticks = len(rows)
-            total_ticks += n_ticks
+                n_ticks = len(rows)
 
-            for row in rows:
-                writer.writerow([ric] + row)
-            csv_file.flush()
+                with csv_lock:
+                    for row in rows:
+                        csv_writer.writerow([ric] + row)
+                    csv_file.flush()
 
-            if n_ticks > 0:
-                contracts_with_data += 1
-                if global_earliest is None or earliest < global_earliest:
-                    global_earliest = earliest
-                if global_latest is None or latest > global_latest:
-                    global_latest = latest
-            else:
-                contracts_empty += 1
+                log_entry = {
+                    "ric":       ric,
+                    "type":      tick_type,
+                    "ticks":     n_ticks,
+                    "earliest":  earliest,
+                    "latest":    latest,
+                    "requests":  num_reqs,
+                    "elapsed_s": round(elapsed, 2),
+                    "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+                with log_lock:
+                    with open(log_file, "a") as lf:
+                        lf.write(json.dumps(log_entry) + "\n")
 
-            log_completion(log_file, ric, tick_type, n_ticks, earliest, latest, num_requests, elapsed)
+                with stat_lock:
+                    stats["done_count"] += 1
+                    stats["total_ticks"] += n_ticks
+                    stats["total_requests"] += num_reqs
+                    if n_ticks > 0:
+                        stats["contracts_with_data"] += 1
+                        if stats["global_earliest"] is None or earliest < stats["global_earliest"]:
+                            stats["global_earliest"] = earliest
+                        if stats["global_latest"] is None or latest > stats["global_latest"]:
+                            stats["global_latest"] = latest
+                    else:
+                        stats["contracts_empty"] += 1
+                    done_count = stats["done_count"]
 
-            done_count = already_done + progress_idx + 1
-            csv_mb = get_csv_size(csv_path)
-            time_range = f"({earliest[:10]} – {latest[:10]})" if n_ticks > 0 else "(no data)"
-            print(
-                f"[{tick_type}] {done_count}/{total_contracts}  {ric}  "
-                f"{n_ticks} ticks  {time_range}  "
-                f"{num_requests} req  {elapsed:.1f}s  |  "
-                f"total: {total_ticks:,} ticks  CSV: {csv_mb:.1f} MB"
-            )
-
-            if (progress_idx + 1) % SUMMARY_INTERVAL == 0:
-                elapsed_total = time.time() - start_time
-                rate = (progress_idx + 1) / elapsed_total if elapsed_total > 0 else 0
-                eta_s = (len(remaining) - progress_idx - 1) / rate if rate > 0 else 0
-                eta_h = eta_s / 3600
-                print(f"\n  --- [{ticker}] SUMMARY after {done_count}/{total_contracts} contracts ---")
-                print(f"  Total {tick_type} ticks: {total_ticks:,}")
-                print(f"  Contracts with data: {contracts_with_data}, empty: {contracts_empty}")
-                print(f"  Data range: {global_earliest or 'N/A'} to {global_latest or 'N/A'}")
-                print(f"  CSV size: {csv_mb:.1f} MB")
-                print(f"  Elapsed: {elapsed_total/3600:.1f}h, ETA: {eta_h:.1f}h")
-                print(f"  Rate: {rate:.1f} contracts/s")
-                print()
-
-            time.sleep(TICK_SLEEP)
+                time_range = f"({earliest[:10]} – {latest[:10]})" if n_ticks > 0 else "(no data)"
+                csv_mb = os.path.getsize(csv_path) / (1024 * 1024) if os.path.exists(csv_path) else 0
+                print(
+                    f"[{tick_type}] {done_count}/{total_contracts}  {ric}  "
+                    f"{n_ticks:,} ticks  {time_range}  "
+                    f"{num_reqs} req  {elapsed:.1f}s  |  "
+                    f"total: {stats['total_ticks']:,}  "
+                    f"rate: {rate_limiter.current_rate():.1f}/s  "
+                    f"CSV: {csv_mb:.0f} MB"
+                )
 
     finally:
+        stop_progress.set()
+        progress_thread.join(timeout=2)
         csv_file.close()
 
     elapsed_total = time.time() - start_time
-    csv_mb = get_csv_size(csv_path)
-    print(f"\n{'=' * 70}")
-    print(f"[{ticker}] {tick_type.upper()} DOWNLOAD COMPLETE")
-    print(f"{'=' * 70}")
-    print(f"  Contracts processed: {len(remaining)}")
-    print(f"  Contracts with data: {contracts_with_data}")
-    print(f"  Contracts empty: {contracts_empty}")
-    print(f"  Total ticks: {total_ticks:,}")
-    print(f"  Data range: {global_earliest or 'N/A'} to {global_latest or 'N/A'}")
-    print(f"  CSV size: {csv_mb:.1f} MB")
-    print(f"  Elapsed: {elapsed_total/3600:.1f}h")
+    csv_mb = os.path.getsize(csv_path) / (1024 * 1024) if os.path.exists(csv_path) else 0
+
+    summary = (
+        f"\n{'=' * 70}\n"
+        f"[{ticker}] {tick_type.upper()} DOWNLOAD COMPLETE\n"
+        f"{'=' * 70}\n"
+        f"  Contracts processed:  {len(remaining)}\n"
+        f"  Contracts with data:  {stats['contracts_with_data']}\n"
+        f"  Contracts empty:      {stats['contracts_empty']}\n"
+        f"  Total ticks:          {stats['total_ticks']:,}\n"
+        f"  Total requests:       {stats['total_requests']:,}\n"
+        f"  Data range:           {stats['global_earliest'] or 'N/A'} to {stats['global_latest'] or 'N/A'}\n"
+        f"  CSV size:             {csv_mb:.1f} MB\n"
+        f"  Elapsed:              {elapsed_total/3600:.2f}h\n"
+        f"  Final rate:           {rate_limiter.current_rate():.2f} req/sec\n"
+    )
+    print(summary)
+    with open(progress_log_path, "a") as pf:
+        pf.write(summary)
 
 
 # =====================================================================
@@ -454,50 +544,52 @@ def download_all_ticks(tm, contracts, tick_type, csv_path, field_names_expected,
 # =====================================================================
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python download_option_ticks.py TICKER [MODE]")
+        print("Usage: python download_option_ticks.py TICKER [MODE] [WORKERS]")
         print(f"  Supported tickers: {', '.join(sorted(UNDERLYING_MAP.keys()))}")
         print("  Modes: all (default), discover, trades, quotes")
         sys.exit(1)
 
-    ticker = sys.argv[1].upper()
-    mode = sys.argv[2] if len(sys.argv) > 2 else "all"
+    ticker  = sys.argv[1].upper()
+    mode    = sys.argv[2] if len(sys.argv) > 2 else "all"
+    workers = int(sys.argv[3]) if len(sys.argv) > 3 else DEFAULT_WORKERS
 
     if mode not in ("all", "discover", "trades", "quotes"):
         print(f"Unknown mode: {mode}. Use: all, discover, trades, quotes")
         sys.exit(1)
 
     if ticker not in UNDERLYING_MAP:
-        # Try to guess: assume Nasdaq-listed
         print(f"Warning: {ticker} not in known map, assuming UnderlyingQuoteRIC = '{ticker}.O'")
         base_filter = f"UnderlyingQuoteRIC eq '{ticker}.O'"
     else:
         base_filter, _ = UNDERLYING_MAP[ticker]
 
-    # Paths
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    base_dir = os.path.join(script_dir, ticker)
+    script_dir    = os.path.dirname(os.path.abspath(__file__))
+    base_dir      = os.path.join(script_dir, ticker)
     os.makedirs(base_dir, exist_ok=True)
 
     contracts_csv = os.path.join(base_dir, "option_contracts.csv")
-    trade_csv = os.path.join(base_dir, "trade_ticks.csv")
-    quote_csv = os.path.join(base_dir, "quote_ticks.csv")
-    log_file = os.path.join(base_dir, "download_log.jsonl")
+    trade_csv     = os.path.join(base_dir, "trade_ticks.csv")
+    quote_csv     = os.path.join(base_dir, "quote_ticks.csv")
+    log_file      = os.path.join(base_dir, "download_log.jsonl")
 
-    print(f"Ticker: {ticker}")
-    print(f"Filter: {base_filter}")
-    print(f"Output: {base_dir}/")
+    print(f"Ticker:  {ticker}")
+    print(f"Mode:    {mode}")
+    print(f"Workers: {workers}")
+    print(f"Filter:  {base_filter}")
+    print(f"Output:  {base_dir}/")
 
     session, config_path = setup_session(base_dir)
     tm = TokenManager(session)
 
+    # Single rate limiter shared across all stages
+    rate_limiter = AdaptiveRateLimiter(INITIAL_RATE)
+
     try:
-        # Step 1: Discover contracts
         if mode in ("all", "discover"):
-            contracts = discover_contracts(tm, ticker, base_filter, contracts_csv)
+            contracts = discover_contracts(tm, ticker, base_filter, contracts_csv, rate_limiter)
         else:
             if not os.path.exists(contracts_csv):
-                print(f"No contracts file found at {contracts_csv}. Run discovery first:")
-                print(f"  python download_option_ticks.py {ticker} discover")
+                print(f"No contracts file found at {contracts_csv}. Run discovery first.")
                 sys.exit(1)
             contracts = load_contracts(contracts_csv)
             print(f"Loaded {len(contracts)} contracts from {contracts_csv}")
@@ -505,13 +597,18 @@ def main():
         if mode == "discover":
             return
 
-        # Step 2: Trade ticks
         if mode in ("all", "trades"):
-            download_all_ticks(tm, contracts, "trade", trade_csv, TRADE_FIELDS, log_file, ticker)
+            download_all_ticks(
+                tm, contracts, "trade", trade_csv, TRADE_FIELDS,
+                log_file, ticker, workers
+            )
 
-        # Step 3: Quote ticks (disabled — greeks-only value not worth the volume)
+        # Quote ticks disabled — too dense, greeks-only value not worth volume
         if mode in ("quotes",):
-            download_all_ticks(tm, contracts, "quote", quote_csv, QUOTE_FIELDS, log_file, ticker)
+            download_all_ticks(
+                tm, contracts, "quote", quote_csv, QUOTE_FIELDS,
+                log_file, ticker, workers
+            )
 
     finally:
         ld.close_session()
