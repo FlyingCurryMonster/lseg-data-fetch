@@ -57,8 +57,8 @@ MIN_RATE = 0.5
 # OptionMetrics secid map — add more as needed
 OM_SECID = {
     "NVDA": 108321,
-    "AMD":  101626,
-    "TSLA": 107598,
+    "AMD":  101121,
+    "TSLA": 143439,
     "SPY":  109820,
 }
 
