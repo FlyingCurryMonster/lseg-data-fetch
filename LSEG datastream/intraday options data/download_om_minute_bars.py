@@ -56,10 +56,20 @@ MIN_RATE = 0.5
 
 # OptionMetrics secid map — add more as needed
 OM_SECID = {
-    "NVDA": 108321,
-    "AMD":  101121,
-    "TSLA": 143439,
-    "SPY":  109820,
+    "NVDA":  108321,
+    "AMD":   101121,
+    "TSLA":  143439,
+    "SPY":   109820,
+    "AAPL":  101594,
+    "MSFT":  107525,
+    "AMZN":  101310,
+    "GOOGL": 121812,
+    "META":  154402,
+    "JPM":   102936,
+    "LLY":   106967,
+    "AVGO":  139322,
+    "COST":  103466,
+    "XOM":   104533,
 }
 
 # LSEG ticker root overrides (if different from OM ticker)
@@ -144,6 +154,8 @@ class AdaptiveRateLimiter:
         self._request_times = deque()
         self._total_requests = 0
         self._total_429s = 0
+        self._last_429_time = 0.0      # monotonic time of last 429
+        self._last_recovery_time = 0.0 # monotonic time of last rate increase
 
     def acquire(self):
         while True:
@@ -158,6 +170,15 @@ class AdaptiveRateLimiter:
                     self._request_times.append(now)
                     while self._request_times and now - self._request_times[0] > 60:
                         self._request_times.popleft()
+                    # Recover rate by 5% if no 429 in the last 60s and rate is below cap
+                    if (self._rate < INITIAL_RATE
+                            and now - self._last_429_time >= 60.0
+                            and now - self._last_recovery_time >= 60.0):
+                        old = self._rate
+                        self._rate = min(INITIAL_RATE, self._rate * 1.05)
+                        self._last_recovery_time = now
+                        print(f"\n  *** recovery — rate {old:.2f} → {self._rate:.2f} req/sec ***\n",
+                              flush=True)
                     return
             time.sleep(0.001)
 
@@ -166,6 +187,7 @@ class AdaptiveRateLimiter:
             old = self._rate
             self._rate = max(MIN_RATE, self._rate * RATE_BACKOFF)
             self._total_429s += 1
+            self._last_429_time = time.monotonic()
             print(f"\n  *** 429 — rate {old:.2f} → {self._rate:.2f} req/sec "
                   f"(total 429s: {self._total_429s}) ***\n", flush=True)
 
@@ -231,11 +253,17 @@ def setup_session(base_dir):
 # =====================================================================
 # Fetch bars for one RIC (all pages)
 # =====================================================================
-def fetch_bars(tm, rl, ric):
+def fetch_bars(tm, rl, ric, max_weeks=2):
+    """
+    Fetch 1-min bars for a RIC, paginating backwards.
+    Stops after max_weeks of data (measured from the most recent bar).
+    Set max_weeks=None for unlimited (full history).
+    """
     url = f"{HIST_URL}/intraday-summaries/{ric}"
     all_rows = []
     num_requests = 0
     end_param = None
+    cutoff_ts = None  # earliest allowed timestamp (latest_ts - max_weeks)
 
     while True:
         params = {"count": str(BATCH_SIZE)}
@@ -274,7 +302,27 @@ def fetch_bars(tm, rl, ric):
         if not batch_rows:
             break
 
-        all_rows.extend(batch_rows)
+        # Set cutoff on first batch using the latest (most recent) timestamp
+        if cutoff_ts is None and max_weeks is not None:
+            from datetime import datetime, timedelta
+            latest_ts = datetime.fromisoformat(batch_rows[0][0][:19].replace("Z", ""))
+            cutoff_ts = latest_ts - timedelta(weeks=max_weeks)
+
+        # Trim batch to rows within the window
+        if cutoff_ts is not None:
+            from datetime import datetime
+            trimmed = []
+            for row in batch_rows:
+                ts = datetime.fromisoformat(row[0][:19].replace("Z", ""))
+                if ts >= cutoff_ts:
+                    trimmed.append(row)
+                else:
+                    break  # rows are newest-first, so once we're past cutoff we're done
+            all_rows.extend(trimmed)
+            if len(trimmed) < len(batch_rows):
+                break  # hit the cutoff, stop paginating
+        else:
+            all_rows.extend(batch_rows)
 
         if len(batch_rows) < BATCH_SIZE:
             break
@@ -353,12 +401,21 @@ def main():
     ticker = sys.argv[1].upper()
     num_workers = int(sys.argv[2]) if len(sys.argv) > 2 else 8
 
-    if ticker not in OM_SECID:
-        print(f"Unknown ticker: {ticker}. Known: {', '.join(sorted(OM_SECID))}")
-        sys.exit(1)
+    if ticker in OM_SECID:
+        secid = OM_SECID[ticker]
+    else:
+        # Look up secid dynamically from ClickHouse
+        ch = Client("localhost")
+        rows = ch.execute(
+            "SELECT DISTINCT secid FROM option_metrics.option_pricing WHERE ticker = %(t)s LIMIT 1",
+            {"t": ticker}
+        )
+        if not rows:
+            print(f"Ticker {ticker} not found in option_metrics.option_pricing — skipping.")
+            sys.exit(2)
+        secid = rows[0][0]
 
-    secid = OM_SECID[ticker]
-    root  = LSEG_ROOT.get(ticker, ticker)
+    root = LSEG_ROOT.get(ticker, ticker)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     base_dir   = os.path.join(script_dir, ticker)
