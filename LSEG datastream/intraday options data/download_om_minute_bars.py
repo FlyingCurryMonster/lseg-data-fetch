@@ -1,46 +1,41 @@
 """
-Download 1-minute bars for all expired option contracts in the OptionMetrics
-option_pricing table, within the LSEG 1-year retention window.
+Download 1-minute bars for expired option contracts from a pre-generated
+RIC list CSV, using the LSEG Historical Pricing API.
 
-Queries ClickHouse for contracts, constructs expired LSEG RICs, downloads
-1-min bars with adaptive rate limiting and parallel workers.
+Reads contracts from a CSV file (no ClickHouse required). Supports all three
+contract source files:
+  - all_om_contracts.csv    (OptionMetrics, base_ric/query_ric columns)
+  - all_cboe_contracts.csv  (CBOE Dec 5 snapshot, base_ric/query_ric columns)
+  - all_names_gap_rics.csv  (gap period Aug–Dec 2025, ric column)
 
 Usage:
-  python download_om_minute_bars.py TICKER [WORKERS]
+  python download_om_minute_bars.py TICKER [WORKERS] [--csv CONTRACTS_CSV]
 
   TICKER:  NVDA, AMD, TSLA, SPY, etc.
   WORKERS: parallel workers (default: 8)
+  --csv:   path to contracts CSV (default: all_om_contracts.csv in script dir)
 
-Output: {TICKER}/om_minute_bars.csv
-        {TICKER}/om_bars_log.jsonl     (resume + progress log)
-        {TICKER}/om_bars_progress.log  (timestamped throughput log)
+Output: {TICKER}/om_minute_bars.csv        (bar data; columns discovered from API)
+        {TICKER}/om_bars_log.jsonl          (resume + progress log)
+        {TICKER}/om_bars_progress.log       (timestamped throughput log)
 
 Safe to kill and restart — resumes from om_bars_log.jsonl.
-
-LSEG RIC construction from OptionMetrics fields:
-  - Root: ticker symbol
-  - Month code: A-L (Jan-Dec) for calls, M-X (Jan-Dec) for puts
-  - Day: DD of expiry
-  - Year: YY of expiry
-  - Strike: (strike_price / 10) zero-padded to 5 digits
-  - Suffix: ^<month_code><YY> for expired contracts
-  Example: NVDA $120 Call exp 2025-06-20 → NVDAF202512000.U^F25
+Downloads full available history (up to LSEG's 1-year rolling retention window).
 """
 
+import argparse
 import csv
 import json
 import os
-import sys
 import time
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, date, timedelta
+from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
 import lseg.data as ld
-from clickhouse_driver import Client
 
 load_dotenv()
 
@@ -54,92 +49,34 @@ INITIAL_RATE = 23.0   # req/sec (limit is 25 for intraday-summaries)
 RATE_BACKOFF = 0.90   # multiply by this on each 429
 MIN_RATE = 0.5
 
-# OptionMetrics secid map — add more as needed
-OM_SECID = {
-    "NVDA":  108321,
-    "AMD":   101121,
-    "TSLA":  143439,
-    "SPY":   109820,
-    "AAPL":  101594,
-    "MSFT":  107525,
-    "AMZN":  101310,
-    "GOOGL": 121812,
-    "META":  154402,
-    "JPM":   102936,
-    "LLY":   106967,
-    "AVGO":  139322,
-    "COST":  103466,
-    "XOM":   104533,
-}
-
-# LSEG ticker root overrides (if different from OM ticker)
-LSEG_ROOT = {
-    "SPY": "SPY",
-    "NVDA": "NVDA",
-    "AMD": "AMD",
-    "TSLA": "TSLA",
-}
-
-CALL_CODES = "ABCDEFGHIJKL"  # A=Jan ... L=Dec
-PUT_CODES  = "MNOPQRSTUVWX"  # M=Jan ... X=Dec
-
-BAR_FIELDS = [
-    "DATE_TIME", "HIGH_1", "LOW_1", "OPEN_PRC", "TRDPRC_1",
-    "NUM_MOVES", "ACVOL_UNS",
-    "BID_HIGH_1", "BID_LOW_1", "OPEN_BID", "BID", "BID_NUMMOV",
-    "ASK_HIGH_1", "ASK_LOW_1", "OPEN_ASK", "ASK", "ASK_NUMMOV",
-]
-
 
 # =====================================================================
-# RIC construction
+# Contract loading from CSV
 # =====================================================================
-def build_lseg_ric(root, exdate_str, cp_flag, strike_price):
+def load_contracts_from_csv(ticker, csv_path):
     """
-    Build expired LSEG OPRA RIC from OptionMetrics fields.
+    Load contracts for a ticker from a pre-generated CSV.
 
-    Args:
-        root:         ticker root (e.g. 'NVDA')
-        exdate_str:   'YYYY-MM-DD'
-        cp_flag:      'C' or 'P'
-        strike_price: raw OM value (divide by 10 for LSEG strike cents)
+    Supports:
+      - Files with base_ric/query_ric columns (all_om_contracts.csv,
+        all_cboe_contracts.csv)
+      - Files with a ric column (all_names_gap_rics.csv)
 
-    Returns:
-        Expired RIC string, e.g. 'NVDAF202512000.U^F25'
+    Returns list of (base_ric, query_ric) tuples.
     """
-    month = int(exdate_str[5:7])
-    day   = int(exdate_str[8:10])
-    year  = int(exdate_str[2:4])
-
-    month_code = CALL_CODES[month - 1] if cp_flag == "C" else PUT_CODES[month - 1]
-    lseg_strike = int(strike_price) // 10
-    expired_code = CALL_CODES[month - 1]  # suffix always uses call-side letter
-
-    active_ric = f"{root}{month_code}{day:02d}{year:02d}{lseg_strike:05d}.U"
-    return f"{active_ric}^{expired_code}{year:02d}"
-
-
-# =====================================================================
-# ClickHouse query
-# =====================================================================
-def fetch_om_contracts(secid, ticker, window_start, window_end):
-    """
-    Query OptionMetrics for all unique contracts expiring within the window.
-    Returns list of (exdate, cp_flag, strike_price) tuples.
-    """
-    ch = Client("localhost")
-    rows = ch.execute(
-        """
-        SELECT DISTINCT exdate, cp_flag, strike_price
-        FROM option_metrics.option_pricing
-        WHERE secid = %(secid)s
-          AND exdate >= %(start)s
-          AND exdate < %(end)s
-        ORDER BY exdate, cp_flag, strike_price
-        """,
-        {"secid": secid, "start": window_start, "end": window_end},
-    )
-    return rows  # list of (date, str, int)
+    contracts = []
+    ticker_upper = ticker.upper()
+    with open(csv_path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row.get("ticker", "").upper() != ticker_upper:
+                continue
+            if "query_ric" in row:
+                contracts.append((row["base_ric"], row["query_ric"]))
+            else:
+                ric = row["ric"]
+                contracts.append((ric.split("^")[0], ric))
+    return contracts
 
 
 # =====================================================================
@@ -251,19 +188,22 @@ def setup_session(base_dir):
 
 
 # =====================================================================
-# Fetch bars for one RIC (all pages)
+# Fetch bars for one RIC (all pages, full history)
 # =====================================================================
-def fetch_bars(tm, rl, ric, max_weeks=2):
+def fetch_bars(tm, rl, ric):
     """
-    Fetch 1-min bars for a RIC, paginating backwards.
-    Stops after max_weeks of data (measured from the most recent bar).
-    Set max_weeks=None for unlimited (full history).
+    Fetch all available 1-min bars for a RIC (up to LSEG's 1-year retention window),
+    paginating backwards until no more data.
+
+    Returns:
+        (all_rows, num_requests, earliest, latest, field_names)
+        field_names: list of column names from the API response headers, or None
     """
     url = f"{HIST_URL}/intraday-summaries/{ric}"
     all_rows = []
     num_requests = 0
     end_param = None
-    cutoff_ts = None  # earliest allowed timestamp (latest_ts - max_weeks)
+    field_names = None
 
     while True:
         params = {"count": str(BATCH_SIZE)}
@@ -296,33 +236,20 @@ def fetch_bars(tm, rl, ric, max_weeks=2):
         data = resp.json()
         batch_rows = []
         for item in data:
-            if isinstance(item, dict) and "data" in item and item["data"]:
+            if not isinstance(item, dict):
+                continue
+            if field_names is None and "headers" in item:
+                field_names = [
+                    h["name"] if isinstance(h, dict) else str(h)
+                    for h in item["headers"]
+                ]
+            if "data" in item and item["data"]:
                 batch_rows = item["data"]
 
         if not batch_rows:
             break
 
-        # Set cutoff on first batch using the latest (most recent) timestamp
-        if cutoff_ts is None and max_weeks is not None:
-            from datetime import datetime, timedelta
-            latest_ts = datetime.fromisoformat(batch_rows[0][0][:19].replace("Z", ""))
-            cutoff_ts = latest_ts - timedelta(weeks=max_weeks)
-
-        # Trim batch to rows within the window
-        if cutoff_ts is not None:
-            from datetime import datetime
-            trimmed = []
-            for row in batch_rows:
-                ts = datetime.fromisoformat(row[0][:19].replace("Z", ""))
-                if ts >= cutoff_ts:
-                    trimmed.append(row)
-                else:
-                    break  # rows are newest-first, so once we're past cutoff we're done
-            all_rows.extend(trimmed)
-            if len(trimmed) < len(batch_rows):
-                break  # hit the cutoff, stop paginating
-        else:
-            all_rows.extend(batch_rows)
+        all_rows.extend(batch_rows)
 
         if len(batch_rows) < BATCH_SIZE:
             break
@@ -331,7 +258,7 @@ def fetch_bars(tm, rl, ric, max_weeks=2):
 
     earliest = all_rows[-1][0][:19] if all_rows else ""
     latest   = all_rows[0][0][:19]  if all_rows else ""
-    return all_rows, num_requests, earliest, latest
+    return all_rows, num_requests, earliest, latest, field_names
 
 
 # =====================================================================
@@ -355,14 +282,20 @@ def load_completed(log_file):
 # =====================================================================
 # Worker
 # =====================================================================
-def worker_task(tm, rl, ric, query_ric, bars_csv, csv_lock, log_file, log_lock, counters, counter_lock):
+def worker_task(tm, rl, ric, query_ric, bars_csv, csv_lock, header_event,
+                log_file, log_lock, counters, counter_lock):
     t0 = time.time()
-    rows, num_requests, earliest, latest = fetch_bars(tm, rl, query_ric)
+    rows, num_requests, earliest, latest, field_names = fetch_bars(tm, rl, query_ric)
     elapsed = time.time() - t0
     n = len(rows)
 
     if rows:
         with csv_lock:
+            # Write CSV header on first worker that returns data (once only)
+            if field_names and not header_event.is_set():
+                with open(bars_csv, "w", newline="") as f:
+                    csv.writer(f).writerow(["ric"] + field_names)
+                header_event.set()
             with open(bars_csv, "a", newline="") as f:
                 writer = csv.writer(f)
                 for row in rows:
@@ -394,66 +327,43 @@ def worker_task(tm, rl, ric, query_ric, bars_csv, csv_lock, log_file, log_lock, 
 # Main
 # =====================================================================
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python download_om_minute_bars.py TICKER [WORKERS]")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Download 1-min option bars from pre-generated RIC list"
+    )
+    parser.add_argument("ticker", help="Ticker symbol (e.g. NVDA, SPY)")
+    parser.add_argument("workers", nargs="?", type=int, default=8)
+    parser.add_argument("--csv", dest="contracts_csv", default=None,
+                        help="Contracts CSV with base_ric/query_ric columns "
+                             "(default: all_om_contracts.csv in script dir)")
+    args = parser.parse_args()
 
-    ticker = sys.argv[1].upper()
-    num_workers = int(sys.argv[2]) if len(sys.argv) > 2 else 8
+    ticker = args.ticker.upper()
+    num_workers = args.workers
 
-    if ticker in OM_SECID:
-        secid = OM_SECID[ticker]
-    else:
-        # Look up secid dynamically from ClickHouse
-        ch = Client("localhost")
-        rows = ch.execute(
-            "SELECT DISTINCT secid FROM option_metrics.option_pricing WHERE ticker = %(t)s LIMIT 1",
-            {"t": ticker}
-        )
-        if not rows:
-            print(f"Ticker {ticker} not found in option_metrics.option_pricing — skipping.")
-            sys.exit(2)
-        secid = rows[0][0]
-
-    root = LSEG_ROOT.get(ticker, ticker)
-
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    base_dir   = os.path.join(script_dir, ticker)
+    script_dir    = os.path.dirname(os.path.abspath(__file__))
+    contracts_csv = args.contracts_csv or os.path.join(script_dir, "all_om_contracts.csv")
+    base_dir      = os.path.join(script_dir, ticker)
     os.makedirs(base_dir, exist_ok=True)
 
-    bars_csv    = os.path.join(base_dir, "om_minute_bars.csv")
-    log_file    = os.path.join(base_dir, "om_bars_log.jsonl")
+    bars_csv     = os.path.join(base_dir, "om_minute_bars.csv")
+    log_file     = os.path.join(base_dir, "om_bars_log.jsonl")
     progress_log = os.path.join(base_dir, "om_bars_progress.log")
 
-    # 1-year retention window
-    today        = date.today()
-    window_end   = today
-    window_start = today - timedelta(days=365)
-
-    print(f"Ticker:       {ticker}  (OM secid {secid})")
-    print(f"Window:       {window_start} → {window_end}  (1-year retention)")
+    print(f"Ticker:       {ticker}")
+    print(f"Contracts:    {os.path.basename(contracts_csv)}")
     print(f"Workers:      {num_workers}")
+    print(f"History:      full (1-year LSEG retention window)")
     print(f"Initial rate: {INITIAL_RATE} req/sec  (limit: 25)")
     print(f"Output:       {bars_csv}")
     print()
 
-    # Fetch contracts from OptionMetrics
-    print("Querying OptionMetrics for expired contracts...", flush=True)
-    om_rows = fetch_om_contracts(secid, ticker, str(window_start), str(window_end))
-    print(f"  Found {len(om_rows):,} unique contracts in OptionMetrics")
-
-    # Build RICs
-    contracts = []
-    for exdate, cp_flag, strike_price in om_rows:
-        exdate_str = str(exdate)[:10]
-        ric       = build_lseg_ric(root, exdate_str, cp_flag, strike_price)
-        # strip the ^suffix for the "canonical" key (stored in CSV and log)
-        base_ric  = ric.split("^")[0]
-        contracts.append((base_ric, ric, exdate_str))
+    print(f"Loading contracts from {os.path.basename(contracts_csv)}...", flush=True)
+    contracts = load_contracts_from_csv(ticker, contracts_csv)
+    print(f"  Found {len(contracts):,} contracts for {ticker}")
 
     # Resume
     completed = load_completed(log_file)
-    remaining = [(base_ric, query_ric, exdate) for base_ric, query_ric, exdate in contracts
+    remaining = [(base_ric, query_ric) for base_ric, query_ric in contracts
                  if base_ric not in completed]
 
     print(f"  Already completed: {len(completed):,}")
@@ -464,11 +374,6 @@ def main():
         print("Nothing to do!")
         return
 
-    # Write CSV header if new
-    if not os.path.exists(bars_csv) or os.path.getsize(bars_csv) == 0:
-        with open(bars_csv, "w", newline="") as f:
-            csv.writer(f).writerow(["ric"] + BAR_FIELDS)
-
     session, config_path = setup_session(base_dir)
     tm = TokenManager(session)
     rl = AdaptiveRateLimiter(INITIAL_RATE)
@@ -477,6 +382,11 @@ def main():
     log_lock     = threading.Lock()
     counter_lock = threading.Lock()
     counters = {"done": 0, "total_bars": 0, "with_data": 0}
+
+    # header_event: set when CSV header has been written (either pre-existing or by first worker)
+    header_event = threading.Event()
+    if os.path.exists(bars_csv) and os.path.getsize(bars_csv) > 0:
+        header_event.set()  # resuming — header already present, don't overwrite
 
     total      = len(remaining)
     start_time = time.time()
@@ -494,10 +404,10 @@ def main():
             futures = {
                 executor.submit(
                     worker_task, tm, rl, base_ric, query_ric,
-                    bars_csv, csv_lock, log_file, log_lock,
-                    counters, counter_lock
+                    bars_csv, csv_lock, header_event,
+                    log_file, log_lock, counters, counter_lock
                 ): base_ric
-                for base_ric, query_ric, _ in remaining
+                for base_ric, query_ric in remaining
             }
 
             for future in as_completed(futures):
