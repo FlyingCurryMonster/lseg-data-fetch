@@ -7,6 +7,10 @@ OptionMetrics database, limited to the **first 2 weeks of available bar data**
 per contract. Covers **6,118 distinct names** ordered by liquidity (most
 contracts first).
 
+> **Known issue:** NDX, SPX, and RUT use CBOE RIC formats that differ from the
+> OPRA equity format this script constructs. They will download 0 or near-0 bars.
+> See `INDEX_RIC_INVESTIGATION.md` before re-running those names.
+
 ---
 
 ## Working Directory
