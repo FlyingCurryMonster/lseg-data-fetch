@@ -1,5 +1,13 @@
 # Intraday Options Pricing — TODO
 
+## Known Issues to Revisit
+
+- **RUT returned 0 bars on all ~40K contracts** — RUT is CBOE-listed, not OPRA. The `.U` suffix RIC format we construct is wrong for it. Need to find correct CBOE RIC format.
+- **NDX, SPX, XSP, MRUT** — all ran with the 2-week limit. NDX returned 0 bars (format mismatch confirmed). SPX returned only 709K bars across 72K contracts (very low hit rate — mostly wrong RICs). XSP returned 338M bars and appears to have worked. Need to investigate correct RIC format for NDX and SPX specifically.
+- **Index options general issue**: OptionMetrics covers many index products whose LSEG RICs don't follow the OPRA equity format. Requires separate investigation into correct RIC construction per exchange.
+
+---
+
 ## Overall Strategy
 
 Work name by name, testing as we go. After each name completes, validate that we got all possible time series before moving on (see item 6).

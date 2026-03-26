@@ -158,6 +158,47 @@ This was discovered during the first test run of download_minute_bars.py on NVDA
 - Jan/Feb/Mar 2026 expired options: `^A26`, `^B26`, `^C26` suffix not yet tested with the corrected understanding above (previously tested without suffix). Need to retest.
 - Can we use OptionMetrics contract lists as a source of truth to construct expired RICs for contracts we didn't discover ourselves?
 
+## Index Option RIC Format — Investigation Needed
+
+NDX, SPX, and RUT returned 0 or near-0 bars when queried with the standard OPRA
+equity RIC format. XSP worked correctly. This needs investigation before
+re-running these names.
+
+**See:** `INDEX_RIC_INVESTIGATION.md` for full findings, hypothesis, and
+step-by-step investigation guide.
+
+---
+
+## Gap RIC Discovery — Complete (2026-03-24)
+
+Built a complete set of LSEG OPRA RICs for expired option contracts in the **Aug 30 – Dec 4, 2025 gap** (after OM ends, before CBOE Dec 5 Wayback snapshot).
+
+### Three-layer approach
+1. **OM Aug 29 snapshot** — contracts already listed in option_pricing before the gap
+2. **CBOE Dec 5 Wayback snapshot** — `cboe_all_series_20251205.csv`, 1.7M rows, all listed series as of Dec 5 2025
+3. **Brute-force probe** — calendar-generated expiry dates × CBOE Dec 5 strike ladder, probed against LSEG intraday-summaries endpoint
+
+### Results
+- **482,160 RICs probed** across 672 names (665 weekly + 7 daily series)
+- **467,336 confirmed hits — 96.9% hit rate**
+- 14,824 errors (session token likely expired near end of run — need re-probe)
+- Monthly-only names (~4,653) skipped — Nov 21 monthly already in OM
+
+### Files (`LSEG datastream/expired options search/`)
+| File | Description |
+|------|-------------|
+| `cboe_all_series_20251205.csv` | Raw CBOE snapshot, 1.7M rows |
+| `all_names_gap_rics.csv` | 482,160 candidates for 672 names |
+| `all_names_gap_probe_results.csv` | Probe results (96.9% hit) |
+| `master_gap_rics_all.csv` | 111,264 RICs for 16 core names (100% hit) |
+| `probe_master_gap_results.csv` | Probe results for 16 core names |
+
+### TODO
+- Re-probe 14,824 errored rows in `all_names_gap_probe_results.csv`
+- Consolidation script: combine OM contracts + gap probe hits → per-ticker download lists
+
+---
+
 ## Option RIC Format (US equities, OPRA)
 
 `<ROOT><YYMMDD><C/P><STRIKE*1000 zero-padded 8 digits>.U`
