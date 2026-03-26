@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 WORKERS="${1:-8}"
-TICKERS_CSV="all_om_tickers.csv"
+TICKERS_CSV="../expired options search/all_om_tickers.csv"
 MASTER_LOG="om_all_run.log"
 
 if [ ! -f "$TICKERS_CSV" ]; then
@@ -45,7 +45,7 @@ while IFS=',' read -r ticker secid contracts; do
     DONE=$((DONE + 1))
 
     # Check if already complete
-    run_log="$ticker/om_run.log"
+    run_log="data/$ticker/om_run.log"
     if [ -f "$run_log" ] && grep -q "COMPLETE" "$run_log"; then
         echo "[SKIP $DONE/$TOTAL] $ticker — already complete" | tee -a "$MASTER_LOG"
         SKIPPED=$((SKIPPED + 1))
@@ -57,16 +57,16 @@ while IFS=',' read -r ticker secid contracts; do
     echo "[RUN $DONE/$TOTAL] $ticker  (secid=$secid, ~$contracts contracts)  $(date)" | tee -a "$MASTER_LOG"
     echo "------------------------------------------------------------" | tee -a "$MASTER_LOG"
 
-    mkdir -p "$ticker"
+    mkdir -p "data/$ticker"
 
     PYTHONUNBUFFERED=1 python download_om_minute_bars.py "$ticker" "$WORKERS" \
-        >> "$ticker/om_run.log" 2>&1
+        >> "data/$ticker/om_run.log" 2>&1
 
     EXIT_CODE=$?
 
-    if grep -q "COMPLETE" "$ticker/om_run.log" 2>/dev/null; then
-        BARS=$(grep "Total bars:" "$ticker/om_run.log" | tail -1 | awk '{print $NF}')
-        CSV_SIZE=$(grep "CSV size:" "$ticker/om_run.log" | tail -1 | awk '{print $NF, $(NF-1)}')
+    if grep -q "COMPLETE" "data/$ticker/om_run.log" 2>/dev/null; then
+        BARS=$(grep "Total bars:" "data/$ticker/om_run.log" | tail -1 | awk '{print $NF}')
+        CSV_SIZE=$(grep "CSV size:" "data/$ticker/om_run.log" | tail -1 | awk '{print $NF, $(NF-1)}')
         echo "[DONE $DONE/$TOTAL] $ticker — bars: $BARS  csv: $CSV_SIZE  $(date)" | tee -a "$MASTER_LOG"
     else
         echo "[ERROR $DONE/$TOTAL] $ticker — exit code $EXIT_CODE  $(date)" | tee -a "$MASTER_LOG"

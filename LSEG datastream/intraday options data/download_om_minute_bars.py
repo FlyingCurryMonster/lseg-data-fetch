@@ -341,8 +341,9 @@ def main():
     num_workers = args.workers
 
     script_dir    = os.path.dirname(os.path.abspath(__file__))
-    contracts_csv = args.contracts_csv or os.path.join(script_dir, "all_om_contracts.csv")
-    base_dir      = os.path.join(script_dir, ticker)
+    default_csv   = os.path.join(script_dir, "..", "expired options search", "all_om_contracts.csv")
+    contracts_csv = args.contracts_csv or os.path.normpath(default_csv)
+    base_dir      = os.path.join(script_dir, "data", ticker)
     os.makedirs(base_dir, exist_ok=True)
 
     bars_csv     = os.path.join(base_dir, "om_minute_bars.csv")
