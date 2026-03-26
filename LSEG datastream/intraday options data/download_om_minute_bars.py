@@ -418,7 +418,7 @@ def main():
     root = LSEG_ROOT.get(ticker, ticker)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    base_dir   = os.path.join(script_dir, ticker)
+    base_dir   = os.path.join(script_dir, "data", ticker)
     os.makedirs(base_dir, exist_ok=True)
 
     bars_csv    = os.path.join(base_dir, "om_minute_bars.csv")
