@@ -12,14 +12,19 @@ products behaved inconsistently:
 | SPX (S&P 500 index) | 73,282 | 709,211 | RIC format mostly wrong (~1% hit rate) |
 | XSP (Mini S&P 500) | 50,560 | 338M | RIC format correct — worked fine |
 | RUT (Russell 2000 index) | 40,596 | 0 | RIC format wrong |
+| RUTW (Russell 2000 weeklies) | 20,492 | 0 | RIC format wrong |
+| MRUT (Micro Russell 2000) | 34,740 | 54.7M | RIC format correct — worked fine |
 | QQQ | 39,690 | Working | OPRA equity format correct (ETF, not index) |
 
 ## Hypothesis
 
-NDX, SPX, and RUT options trade on CBOE under a different RIC convention than
-OPRA equity options. XSP may use OPRA-style RICs despite being an index product
-(it is a "mini" product and may be structured differently). QQQ is an ETF, not
-an index, so OPRA format applies correctly.
+NDX, SPX, RUT, and RUTW options trade on CBOE under a different RIC convention
+than OPRA equity options. XSP and MRUT use OPRA-style RICs despite being index
+products — possibly because they are "micro/mini" sized products structured
+differently. QQQ is an ETF, not an index, so OPRA format applies correctly.
+
+The MRUT vs RUTW contrast is a useful clue: both are Russell-based, but MRUT
+works and RUTW does not. May relate to exchange listing or contract size.
 
 ## What We Know
 
