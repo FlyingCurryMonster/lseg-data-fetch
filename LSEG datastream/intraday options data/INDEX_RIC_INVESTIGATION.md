@@ -8,12 +8,18 @@ products behaved inconsistently:
 
 | Name | Contracts Queried | Bars Returned | Verdict |
 |------|-------------------|---------------|---------|
-| NDX (Nasdaq-100 index) | 107,648 | 0 | RIC format wrong |
-| SPX (S&P 500 index) | 73,282 | 709,211 | RIC format mostly wrong (~1% hit rate) |
+| NDX (Nasdaq-100 index) | 107,648 | 0 | RIC format wrong — skipped |
+| SPX (S&P 500 index) | 73,282 | 709,211 | RIC format mostly wrong (~1% hit rate) — skipped |
 | XSP (Mini S&P 500) | 50,560 | 338M | RIC format correct — worked fine |
-| RUT (Russell 2000 index) | 40,596 | 0 | RIC format wrong |
-| RUTW (Russell 2000 weeklies) | 20,492 | 0 | RIC format wrong |
+| RUT (Russell 2000 index) | 40,596 | 0 | RIC format wrong — skipped |
+| RUTW (Russell 2000 weeklies) | 20,492 | 0 | RIC format wrong — skipped |
 | MRUT (Micro Russell 2000) | 34,740 | 54.7M | RIC format correct — worked fine |
+| SPXW (SPX weeklies) | 17,032 | 0 | RIC format wrong — skipped |
+| XEO (S&P 100 European) | 14,596 | 0 (expected) | RIC format wrong — skipped |
+| OEX (S&P 100 American) | 11,110 | 0 (expected) | RIC format wrong — skipped |
+| XND (Mini Nasdaq-100) | 13,125 | 0 (expected) | RIC format wrong — skipped |
+| MXEA (MSCI EAFE index) | 13,548 | 0 (expected) | RIC format wrong — skipped |
+| CBTXW (unknown, likely CBOE index) | 15,938 | 0 | RIC format wrong — skipped |
 | QQQ | 39,690 | Working | OPRA equity format correct (ETF, not index) |
 
 ## Hypothesis
