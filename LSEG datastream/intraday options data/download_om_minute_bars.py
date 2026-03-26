@@ -13,7 +13,7 @@ Usage:
 
   TICKER:  NVDA, AMD, TSLA, SPY, etc.
   WORKERS: parallel workers (default: 8)
-  --csv:   path to contracts CSV (default: all_om_contracts.csv in script dir)
+  --csv:   path to contracts CSV (default: data/{TICKER}/contracts.csv)
 
 Output: {TICKER}/om_minute_bars.csv        (bar data; columns discovered from API)
         {TICKER}/om_bars_log.jsonl          (resume + progress log)
@@ -68,8 +68,9 @@ def load_contracts_from_csv(ticker, csv_path):
     ticker_upper = ticker.upper()
     with open(csv_path) as f:
         reader = csv.DictReader(f)
+        has_ticker_col = "ticker" in (reader.fieldnames or [])
         for row in reader:
-            if row.get("ticker", "").upper() != ticker_upper:
+            if has_ticker_col and row.get("ticker", "").upper() != ticker_upper:
                 continue
             if "query_ric" in row:
                 contracts.append((row["base_ric"], row["query_ric"]))
@@ -334,17 +335,16 @@ def main():
     parser.add_argument("workers", nargs="?", type=int, default=8)
     parser.add_argument("--csv", dest="contracts_csv", default=None,
                         help="Contracts CSV with base_ric/query_ric columns "
-                             "(default: all_om_contracts.csv in script dir)")
+                             "(default: data/{TICKER}/contracts.csv)")
     args = parser.parse_args()
 
     ticker = args.ticker.upper()
     num_workers = args.workers
 
-    script_dir    = os.path.dirname(os.path.abspath(__file__))
-    default_csv   = os.path.join(script_dir, "..", "expired options search", "all_om_contracts.csv")
-    contracts_csv = args.contracts_csv or os.path.normpath(default_csv)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
     base_dir      = os.path.join(script_dir, "data", ticker)
     os.makedirs(base_dir, exist_ok=True)
+    contracts_csv = args.contracts_csv or os.path.join(base_dir, "contracts.csv")
 
     bars_csv     = os.path.join(base_dir, "om_minute_bars.csv")
     log_file     = os.path.join(base_dir, "om_bars_log.jsonl")

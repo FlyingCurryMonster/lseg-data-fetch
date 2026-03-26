@@ -1,6 +1,8 @@
 #!/bin/bash
-# Run download_om_minute_bars.py for all tickers in all_om_tickers.csv,
-# ordered by liquidity (most contracts first).
+# Run download_om_minute_bars.py for all tickers in all_tickers.csv,
+# ordered by contract count (most contracts first).
+# Contracts for each ticker come from data/{TICKER}/contracts.csv
+# (built by build_ticker_contracts.py — covers OM, CBOE, and gap sources).
 #
 # Safe to kill and restart — completed tickers are skipped automatically.
 # A ticker is considered complete if its om_run.log contains "COMPLETE".
@@ -14,11 +16,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 WORKERS="${1:-8}"
-TICKERS_CSV="../expired options search/all_om_tickers.csv"
+TICKERS_CSV="all_tickers.csv"
 MASTER_LOG="om_all_run.log"
 
 if [ ! -f "$TICKERS_CSV" ]; then
-    echo "ERROR: $TICKERS_CSV not found. Generate it first."
+    echo "ERROR: $TICKERS_CSV not found. Run build_ticker_contracts.py first."
     exit 1
 fi
 
@@ -33,10 +35,9 @@ echo "Total tickers: $TOTAL  Workers per ticker: $WORKERS" | tee -a "$MASTER_LOG
 echo "============================================================" | tee -a "$MASTER_LOG"
 
 # Read tickers in order (skip header)
-while IFS=',' read -r ticker secid contracts; do
+while IFS=',' read -r ticker contracts; do
     # Strip quotes
     ticker="${ticker//\"/}"
-    secid="${secid//\"/}"
     contracts="${contracts//\"/}"
 
     # Skip header row
@@ -54,10 +55,8 @@ while IFS=',' read -r ticker secid contracts; do
 
     echo "" | tee -a "$MASTER_LOG"
     echo "------------------------------------------------------------" | tee -a "$MASTER_LOG"
-    echo "[RUN $DONE/$TOTAL] $ticker  (secid=$secid, ~$contracts contracts)  $(date)" | tee -a "$MASTER_LOG"
+    echo "[RUN $DONE/$TOTAL] $ticker  (~$contracts contracts)  $(date)" | tee -a "$MASTER_LOG"
     echo "------------------------------------------------------------" | tee -a "$MASTER_LOG"
-
-    mkdir -p "data/$ticker"
 
     PYTHONUNBUFFERED=1 python download_om_minute_bars.py "$ticker" "$WORKERS" \
         >> "data/$ticker/om_run.log" 2>&1
