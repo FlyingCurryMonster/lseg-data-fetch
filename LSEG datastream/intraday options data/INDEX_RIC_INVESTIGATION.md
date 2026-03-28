@@ -10,7 +10,7 @@ products behaved inconsistently:
 |------|-------------------|---------------|---------|
 | NDX (Nasdaq-100 index) | 107,648 | 0 | RIC format wrong — skipped |
 | SPX (S&P 500 index) | 73,282 | 709,211 | RIC format mostly wrong (~1% hit rate) — skipped |
-| XSP (Mini S&P 500) | 50,560 | 338M | RIC format correct — worked fine |
+| XSP (Mini S&P 500) | 71,472 | 475M (partial, 48%) | RIC format correct but skipped — 34% zero-bar rate, 3+ days per run, not worth it, will revisit later|
 | RUT (Russell 2000 index) | 40,596 | 0 | RIC format wrong — skipped |
 | RUTW (Russell 2000 weeklies) | 20,492 | 0 | RIC format wrong — skipped |
 | MRUT (Micro Russell 2000) | 34,740 | 54.7M | RIC format correct — worked fine |
