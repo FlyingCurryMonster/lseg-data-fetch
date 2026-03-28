@@ -65,7 +65,7 @@ def expiry_from_ric(query_ric):
     if base.endswith(".U"):
         base = base[:-2]
     # Match: any letters (ROOT), then month_code, then DD (2 digits), YY (2 digits), strike (5 digits)
-    m = re.search(r"([A-X])(\d{2})(\d{2})\d{5}$", base)
+    m = re.search(r"([A-X])(\d{2})(\d{2})\d+$", base)
     if not m:
         return None
     mc, dd, yy = m.group(1), int(m.group(2)), int(m.group(3))
