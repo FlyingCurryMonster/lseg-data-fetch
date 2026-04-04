@@ -266,62 +266,50 @@ def find_resume_date():
 # Download logic
 # =====================================================================
 
-def download_with_dbtype_split(tm, start, end, completed):
-    total = 0
-    for db in DB_TYPES:
-        window_key = f"{start.isoformat()}_{end.isoformat()}_db={db}"
-        if window_key in completed:
-            continue
-        filt = f"{date_filter(start, end)} and DbType eq '{db}'"
-        count = search_count(tm, filt)
-        if count == 0:
-            log_completed_window(window_key, 0)
-            completed.add(window_key)
-            continue
-        if count <= MAX_RESULTS:
-            hits, _ = search_download(tm, filt)
-            append_to_csv(hits)
-            log_completed_window(window_key, len(hits))
-            completed.add(window_key)
-            log_progress(f"    {start} to {end} [{db}]: {len(hits):,} bonds")
-            total += len(hits)
-        else:
-            total += download_with_currency_split(tm, start, end, db, completed)
-    return total
+def download_with_split(tm, start, end, completed, split_by="currency"):
+    """Split a date window by a dimension to get under 10K per slice.
 
-
-def download_with_currency_split(tm, start, end, db, completed):
-    total = 0
-    for ccy in TOP_CURRENCIES:
-        window_key = f"{start.isoformat()}_{end.isoformat()}_db={db}_ccy={ccy}"
-        if window_key in completed:
-            continue
-        filt = f"{date_filter(start, end)} and DbType eq '{db}' and RCSCurrencyLeaf eq '{ccy}'"
-        count = search_count(tm, filt)
-        if count == 0:
-            log_completed_window(window_key, 0)
-            completed.add(window_key)
-            continue
-        if count <= MAX_RESULTS:
-            hits, _ = search_download(tm, filt)
-            append_to_csv(hits)
-            log_completed_window(window_key, len(hits))
-            completed.add(window_key)
-            log_progress(f"      {start} to {end} [{db}/{ccy}]: {len(hits):,} bonds")
-            total += len(hits)
-        else:
-            log_progress(f"      WARNING: {start} [{db}/{ccy}] has {count:,} > 10K, downloading first 10K")
-            hits, _ = search_download(tm, filt)
-            append_to_csv(hits)
-            log_completed_window(window_key, len(hits))
-            completed.add(window_key)
-            total += len(hits)
-
-    # Catch remaining currencies
-    window_key = f"{start.isoformat()}_{end.isoformat()}_db={db}_ccy=OTHER"
-    if window_key not in completed:
+    Args:
+        split_by: "currency" or "dbtype"
+    """
+    if split_by == "currency":
+        buckets = [(ccy, f"RCSCurrencyLeaf eq '{ccy}'") for ccy in TOP_CURRENCIES]
         excl = " and ".join(f"RCSCurrencyLeaf ne '{c}'" for c in TOP_CURRENCIES)
-        filt = f"{date_filter(start, end)} and DbType eq '{db}' and {excl}"
+        other_filt = excl
+    else:
+        buckets = [(db, f"DbType eq '{db}'") for db in DB_TYPES]
+        other_filt = " and ".join(f"DbType ne '{db}'" for db in DB_TYPES)
+
+    total = 0
+    for label, extra_filt in buckets:
+        window_key = f"{start.isoformat()}_{end.isoformat()}_{split_by}={label}"
+        if window_key in completed:
+            continue
+        filt = f"{date_filter(start, end)} and {extra_filt}"
+        count = search_count(tm, filt)
+        if count == 0:
+            log_completed_window(window_key, 0)
+            completed.add(window_key)
+            continue
+        if count <= MAX_RESULTS:
+            hits, _ = search_download(tm, filt)
+            append_to_csv(hits)
+            log_completed_window(window_key, len(hits))
+            completed.add(window_key)
+            log_progress(f"    {start} to {end} [{label}]: {len(hits):,} bonds")
+            total += len(hits)
+        else:
+            log_progress(f"    WARNING: {start} [{label}] has {count:,} > 10K, downloading first 10K")
+            hits, _ = search_download(tm, filt)
+            append_to_csv(hits)
+            log_completed_window(window_key, len(hits))
+            completed.add(window_key)
+            total += len(hits)
+
+    # Catch anything not in our bucket list
+    window_key = f"{start.isoformat()}_{end.isoformat()}_{split_by}=OTHER"
+    if window_key not in completed:
+        filt = f"{date_filter(start, end)} and {other_filt}"
         count = search_count(tm, filt)
         if count == 0:
             log_completed_window(window_key, 0)
@@ -331,10 +319,10 @@ def download_with_currency_split(tm, start, end, db, completed):
             append_to_csv(hits)
             log_completed_window(window_key, len(hits))
             completed.add(window_key)
-            log_progress(f"      {start} to {end} [{db}/OTHER]: {len(hits):,} bonds")
+            log_progress(f"    {start} to {end} [OTHER]: {len(hits):,} bonds")
             total += len(hits)
         else:
-            log_progress(f"      WARNING: {start} [{db}/OTHER] has {count:,} > 10K, downloading first 10K")
+            log_progress(f"    WARNING: {start} [OTHER] has {count:,} > 10K, downloading first 10K")
             hits, _ = search_download(tm, filt)
             append_to_csv(hits)
             log_completed_window(window_key, len(hits))
@@ -365,12 +353,14 @@ def process_chunk(tm, start, end, step_idx, completed):
         return len(hits), step_idx
 
     current_days = (end - start).days
-    new_idx = pick_step_for_count(count, current_days)
 
-    if new_idx is None or new_idx >= len(WINDOW_STEPS):
-        log_progress(f"  {start} to {end}: {count:,} bonds > 10K at 1-day, splitting by DbType")
-        downloaded = download_with_dbtype_split(tm, start, end, completed)
+    # If already a 1-day window, can't shrink further — split by currency
+    if current_days <= 1:
+        log_progress(f"  {start} to {end}: {count:,} bonds > 10K on single day, splitting by currency")
+        downloaded = download_with_split(tm, start, end, completed, split_by="currency")
         return downloaded, len(WINDOW_STEPS) - 1
+
+    new_idx = pick_step_for_count(count, current_days)
 
     sub_step = WINDOW_STEPS[new_idx]
     step_label = f"{step_to_days(sub_step)}d"
