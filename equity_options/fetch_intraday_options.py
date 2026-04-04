@@ -27,7 +27,7 @@ import os
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from lseg_rest_api import LSEGRestClient
+from shared.lseg_rest_api import LSEGRestClient
 
 load_dotenv()
 

@@ -10,10 +10,10 @@ import lseg.data as ld
 import requests
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path="/home/rakin/wrds-data/LSEG datastream/.env")
+load_dotenv()
 
-BASE_DIR = "/home/rakin/wrds-data/LSEG datastream/intraday options data"
-EXP_DIR  = "/home/rakin/wrds-data/LSEG datastream/expired options search"
+BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+EXP_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 HIST_URL = "https://api.refinitiv.com/data/historical-pricing/v1/views"
 WORKERS  = int(sys.argv[1]) if len(sys.argv) > 1 else 8
 

@@ -100,7 +100,7 @@ def build_from_cboe(cboe_file, tickers, out_file):
 
 if __name__ == '__main__':
     import os
-    base = "/home/rakin/wrds-data/LSEG datastream/expired options search"
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
     validate()
 

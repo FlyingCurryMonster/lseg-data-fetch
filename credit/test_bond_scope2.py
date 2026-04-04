@@ -1,12 +1,12 @@
 """Year distribution - query per year to avoid navigator crash."""
 
 import sys, os
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import lseg.data as ld
-from lseg_rest_api import LSEGRestClient
+from shared.lseg_rest_api import LSEGRestClient
 
-config_path = os.path.join(os.path.dirname(__file__), "intraday options data", "lseg-data.config.json")
+config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lseg-data.config.json")
 session = ld.open_session(config_name=config_path)
 rest = LSEGRestClient(session)
 

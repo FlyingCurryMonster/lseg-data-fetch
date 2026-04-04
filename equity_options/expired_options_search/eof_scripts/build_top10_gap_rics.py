@@ -12,7 +12,7 @@ from build_rics import to_ric
 from datetime import date, timedelta
 from collections import defaultdict
 
-BASE     = "/home/rakin/wrds-data/LSEG datastream/expired options search"
+BASE     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 OM_QUERY = "/home/rakin/.claude/projects/-home-rakin-wrds-data/82b6c285-05cf-4688-8dca-c5d5dbb8996b/tool-results/mcp-clickhouse-option-metrics-run_select_query-1774224755418.txt"
 
 TICKERS      = ['AAPL','MSFT','AMZN','GOOGL','META','JPM','LLY','AVGO','COST','XOM']

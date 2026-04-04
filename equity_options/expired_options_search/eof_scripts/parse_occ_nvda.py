@@ -1,4 +1,5 @@
 """Parse full OCC series-search response for NVDA and check expiry date coverage."""
+import os
 import requests
 import io
 import pandas as pd
@@ -62,6 +63,6 @@ print(f"\nTarget window (Aug 2025 → Mar 2026): {len(target):,} expired contrac
 print(target.groupby(target["expiry"].dt.to_period("M")).size().to_string())
 
 # Save full data
-out = "/home/rakin/wrds-data/LSEG datastream/expired options search/nvda_occ_series.csv"
+out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nvda_occ_series.csv")
 df.to_csv(out, index=False)
 print(f"\nSaved to {out}")

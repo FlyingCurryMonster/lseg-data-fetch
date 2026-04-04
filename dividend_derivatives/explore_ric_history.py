@@ -9,11 +9,13 @@ From the official API docs (discovery/symbology/v1):
 """
 
 import json
+import sys
 import lseg.data as ld
 from dotenv import load_dotenv
 import os
 
-from lseg_rest_api import LSEGRestClient
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from shared.lseg_rest_api import LSEGRestClient
 
 load_dotenv()
 

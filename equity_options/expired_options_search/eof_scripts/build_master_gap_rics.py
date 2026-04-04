@@ -18,7 +18,7 @@ from datetime import date, timedelta
 sys.path.insert(0, os.path.dirname(__file__))
 from build_rics import to_ric
 
-BASE = "/home/rakin/wrds-data/LSEG datastream/expired options search"
+BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
 ALL_TICKERS = ['NVDA','AMD','TSLA','SPY','SPX','SPXW',
                'AAPL','MSFT','AMZN','GOOGL','META','JPM','LLY','AVGO','COST','XOM']

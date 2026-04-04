@@ -19,7 +19,7 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from build_rics import to_ric
 
-BASE = "/home/rakin/wrds-data/LSEG datastream/expired options search"
+BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
 GAP_START     = date(2025, 10, 18)
 GAP_END       = date(2025, 12, 4)

@@ -13,11 +13,12 @@ will confirm which RICs actually exist.
 """
 import csv
 import json
+import os
 from datetime import date, timedelta
 from collections import defaultdict
 from build_rics import to_ric  # reuse RIC builder
 
-BASE = "/home/rakin/wrds-data/LSEG datastream/expired options search"
+BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 GAP_START = date(2025, 10, 18)
 GAP_END   = date(2025, 12, 4)   # CBOE snapshot covers Dec 5 onward
 

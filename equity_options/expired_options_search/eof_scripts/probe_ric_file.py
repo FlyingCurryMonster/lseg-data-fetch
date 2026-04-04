@@ -13,9 +13,9 @@ import lseg.data as ld
 import requests
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path="/home/rakin/wrds-data/LSEG datastream/.env")
+load_dotenv()
 
-BASE_DIR = "/home/rakin/wrds-data/LSEG datastream/intraday options data"
+BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 HIST_URL = "https://api.refinitiv.com/data/historical-pricing/v1/views"
 
 if len(sys.argv) < 3:

@@ -21,7 +21,7 @@ import os
 from collections import defaultdict
 
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
-SEARCH_DIR   = os.path.join(SCRIPT_DIR, "..", "expired options search")
+SEARCH_DIR   = os.path.join(SCRIPT_DIR, "expired_options_search")
 DATA_DIR     = os.path.join(SCRIPT_DIR, "data")
 
 SOURCES = [

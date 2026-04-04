@@ -95,7 +95,7 @@ class TokenManager:
     """Manages LSEG auth tokens via direct REST calls."""
 
     def __init__(self):
-        load_dotenv(os.path.join(OUTDIR, ".env"))
+        load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
         self._app_key = os.getenv("DSWS_APPKEY")
         self._username = os.getenv("DSWS_USERNAME")
         self._password = os.getenv("DSWS_PASSWORD")
