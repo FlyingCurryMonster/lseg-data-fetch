@@ -57,8 +57,13 @@ class LSEGRestClient:
         }
 
     def _refresh_token(self):
-        """Re-read the token from the session (the library may have
-        silently refreshed it)."""
+        """Force-refresh the token from the session."""
+        # Try the SDK's own refresh mechanism first
+        if hasattr(self._session, 'update_access_token'):
+            try:
+                self._session.update_access_token()
+            except Exception:
+                pass
         self._token = self._session._access_token
 
     def _post(self, url: str, payload: dict) -> requests.Response:
