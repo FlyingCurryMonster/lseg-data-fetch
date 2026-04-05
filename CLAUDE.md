@@ -25,6 +25,50 @@ This repo contains all LSEG Datastream download pipelines: intraday equity optio
 
 ---
 
+## ClickHouse Tables (Research Machine)
+
+Reference for spot-checking downloaded data against WRDS sources.
+
+### CRSP Database
+| Table | Rows | Date Range | Notes |
+|-------|------|------------|-------|
+| `crsp.daily_stock_monthly` | 33.4M | 1991-2019 | 94-col new CIZ format |
+| `crsp.daily_stock_price_old` | 47.3M | 2000-2024 | 63-col old format, RET/RETX as String |
+| `crsp.daily_stock_annual_update` | 11.3M | 2020-2024 | Same 94-col schema |
+| `crsp.sp500_constituents` | 3.16M | 2000-2024 | Daily prices for S&P 500 members |
+| `crsp.security_names` | 186K | — | PERMNO name/identifier history |
+| `crsp.daily_index_history` | 181K | 2020-2024 | Index-level daily returns |
+| `crsp.distributions` | 171K | — | Dividend/distribution events |
+| `crsp.compustat_link` | 39K | — | GVKEY-PERMNO mapping, LINKENDDT='E' = active |
+| `crsp.daily_market_returns` | 1.5K | 2020-2025 | VW/EW market returns + S&P |
+| `crsp.quarterly_rebalance` | 700 | 2020-2024 | Index rebalance stats |
+
+### OptionMetrics Database
+| Table | Rows | Date Range |
+|-------|------|------------|
+| `option_metrics.forward_price` | 107M | 2000-2025-08-29 |
+| `option_metrics.security_prices` | 52M | 2000-2025-08-29 |
+| `option_metrics.option_pricing` | 4.3B | 1996-2025-08-29 |
+| `option_metrics.index_dividend_yield` | 2.1M | 2000-2023 |
+| `option_metrics.zero_coupon_yield_curve` | 255K | 2000-2023 |
+
+### Compustat Database
+| Table | Notes |
+|-------|-------|
+| `compustat.secd` | Daily security data |
+
+### Key Data Quirks
+- **CRSP return sentinels**: RET/RETX use B,C; DLRET/DLRETX use A,S → stored as String
+- **CRSP SICCD sentinel**: Old format uses 'Z' for missing SIC → stored as String
+- **Compustat link LINKENDDT='E'**: Means link still active → stored as String
+- **ClickHouse ORDER BY**: Cannot use Nullable columns; must make them non-nullable
+- **OptionMetrics `return`**: Reserved word, needs backtick quoting
+- **Old vs New CRSP schemas**: Completely different column names (PRC vs DlyPrc, etc.)
+- CRSP uses negative sentinel values (e.g., -5 in DisPERMCO) → always use signed Int types
+- `SecurityBegDt` has dates back to 1925 → must use Date32 (not Date)
+
+---
+
 ## LSEG API
 
 - **Intraday endpoint**: `https://api.refinitiv.com/data/historical-pricing/v1/views/intraday-summaries/{RIC}`
