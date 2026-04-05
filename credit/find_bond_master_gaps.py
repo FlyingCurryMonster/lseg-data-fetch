@@ -14,8 +14,11 @@ from dotenv import load_dotenv
 # --- Config ---
 SEARCH_URL = "https://api.refinitiv.com/discovery/search/v1/"
 AUTH_URL = "https://api.refinitiv.com/auth/oauth2/v1/token"
-CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bond_security_master_deduped.csv")
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bond_master_gap_check.log")
+OUTDIR = os.path.dirname(os.path.abspath(__file__))
+LOGDIR = os.path.join(OUTDIR, "logs")
+os.makedirs(LOGDIR, exist_ok=True)
+CSV_PATH = os.path.join(OUTDIR, "secmaster", "bond_security_master_deduped.csv")
+LOG_PATH = os.path.join(LOGDIR, "bond_master_gap_check.log")
 
 START_YEAR = 1970
 END_YEAR = 2026
@@ -205,7 +208,7 @@ def main():
             {"year": y, "month": m, "api_count": a, "local_count": l, "gap": g}
             for y, m, a, l, g in gap_months
         ]}
-        report_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gap_report.json")
+        report_path = os.path.join(LOGDIR, "gap_report.json")
         with open(report_path, "w") as f:
             json.dump(report, f, indent=2)
         log(f"Saved gap report to {report_path}")

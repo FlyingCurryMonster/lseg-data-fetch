@@ -1,12 +1,12 @@
 """Check total universe size for ALL bonds (corp + govt + agency + muni + everything)."""
 
 import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import lseg.data as ld
 from shared.lseg_rest_api import LSEGRestClient
 
-config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lseg-data.config.json")
+config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lseg-data.config.json")
 session = ld.open_session(config_name=config_path)
 rest = LSEGRestClient(session)
 
