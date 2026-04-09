@@ -8,6 +8,8 @@ LSEG's fixed income platform covers ~5.1M live instruments globally with evaluat
 
 ## 1. Bond Reference Data / Security Master — STRONG
 
+> **See also**: [bond_pricing_from_secmaster_research.md](bond_pricing_from_secmaster_research.md) — detailed research on fetching pricing data for the 13M+ bond security master we downloaded, including identifier coverage analysis and strategies for non-US ISIN-only bonds.
+
 The IPA Bond API returns **287 columns** per bond:
 
 - **Identifiers**: RIC, ISIN, CUSIP, SEDOL, PermID, issuer OrgID, equity ticker

@@ -22,9 +22,13 @@ from dotenv import load_dotenv
 
 # --- Config ---
 OUTDIR = os.path.dirname(os.path.abspath(__file__))
-CSV_PATH = os.path.join(OUTDIR, "bond_security_master.csv")
-LOG_PATH = os.path.join(OUTDIR, "bond_master_log.jsonl")
-PROGRESS_PATH = os.path.join(OUTDIR, "bond_master_progress.log")
+LOGDIR = os.path.join(OUTDIR, "logs")
+os.makedirs(LOGDIR, exist_ok=True)
+SECMASTER_DIR = os.path.join(OUTDIR, "secmaster")
+os.makedirs(SECMASTER_DIR, exist_ok=True)
+CSV_PATH = os.path.join(SECMASTER_DIR, "bond_security_master.csv")
+LOG_PATH = os.path.join(LOGDIR, "bond_master_log.jsonl")
+PROGRESS_PATH = os.path.join(LOGDIR, "bond_master_progress.log")
 
 MAX_RESULTS = 10000
 SEARCH_URL = "https://api.refinitiv.com/discovery/search/v1/"
