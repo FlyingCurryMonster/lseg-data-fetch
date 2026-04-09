@@ -91,11 +91,33 @@ Strike encoding: `strike_price // 10` (OM strike is in tenths of a cent; LSEG dr
 
 Example: NVDA $120 Call exp 2025-06-20 → `NVDAF202512000.U^F25`
 
+### LSEG Expired RIC Format (CBOE index options)
+
+CBOE index options (SPX, NDX, RUT, etc.) use **lowercase** month codes and a different
+high-strike encoding. Format otherwise identical to OPRA equity (`.U` suffix).
+
+Active RIC: `{ROOT}{lowercase_month_code}{DD}{YY}{strike_5chars}.U`
+Expired RIC: `{active_ric}^{UPPERCASE_month_code}{YY}`
+
+Month codes (calls): a=Jan b=Feb c=Mar d=Apr e=May f=Jun g=Jul h=Aug i=Sep j=Oct k=Nov l=Dec
+Month codes (puts):  m=Jan n=Feb o=Mar p=Apr q=May r=Jun s=Jul t=Aug u=Sep v=Oct w=Nov x=Dec
+
+High-strike encoding (5-char field):
+- $1,000–$9,999: `int + '0'` (e.g., $5500 → `55000`)
+- $10,000–$19,999: `'A' + last 4 digits` (e.g., $15000 → `A5000`)
+- $20,000–$29,999: `'B' + last 4 digits` (e.g., $21000 → `B1000`)
+
+Example: SPX $5500 Call exp 2026-01-16 → `SPXa162655000.U^A26`
+
+**However, LSEG does not retain historical pricing for expired index options.** The RICs
+resolve (HTTP 200) but all OHLCV fields are None. Confirmed 2026-04-09 on both intraday
+and interday endpoints. Active index options return real data.
+
 ### Known RIC Format Issues
-- **NDX, SPX, RUT, RUTW, SPXW, XEO, OEX, XND, MXEA**: CBOE-listed index options use a different RIC format — NOT OPRA equity format. Return 0 bars/ticks. Stamped COMPLETE for **both** minute bars and trades. See `equity_options/INDEX_RIC_INVESTIGATION.md`.
+- **NDX, SPX, RUT, RUTW, SPXW, XEO, OEX, XND, MXEA**: RIC format now known (lowercase months, see above) but **LSEG does not retain expired data**. Stamped COMPLETE for **both** minute bars and trades. See `equity_options/INDEX_RIC_INVESTIGATION.md`.
 - **XSP**: RIC format is correct (OPRA) but skipped — 34% zero-bar rate across 71K contracts, too slow. Stamped COMPLETE for both.
 - **CBTXW**: Unknown CBOE index product, 0 bars/ticks. Stamped COMPLETE for both.
-- **MRUT**: Works correctly with OPRA format despite being an index product.
+- **MRUT**: Works correctly with OPRA uppercase format despite being an index product (OPRA-listed, not CBOE-exclusive).
 
 ---
 
@@ -170,7 +192,7 @@ tail -2 "data/$ACTIVE/om_run.log"
   - Trades: **66% zero-tick rate** — 3-month retention means contracts expired >3 months ago always return 0.
   - Tracked in `om_bars_log.jsonl` / `trades_log.jsonl` (`"bars":0` / `"ticks":0`)
 - **100% zero-bar tickers (RIC issues suspected)**: BKNG (all strikes), BRK (likely BRK.A/BRK.B RIC mismatch)
-- **Skipped (wrong RIC format)**: NDX, SPX, RUT, RUTW, SPXW, XEO, OEX, XND, MXEA, CBTXW, XSP — stamped COMPLETE
+- **Skipped (data access unresolved)**: NDX, SPX, RUT, RUTW, SPXW, XEO, OEX, XND, MXEA, CBTXW — RIC format now known (lowercase months) but current endpoints return all-None for expired index options. Investigating alternative APIs/tiers. XSP skipped for performance. All stamped COMPLETE pending resolution.
 - **Storage estimate**: ~106 bytes/bar; realistic total much lower than 3 TB given 71% zero-bar rate
 
 ### Older/Superseded Scripts
@@ -270,5 +292,5 @@ lseg data fetch/
 - [ ] Re-probe 14,824 errored rows in `all_names_gap_probe_results.csv`
 - [ ] Download bars for gap period contracts (`all_names_gap_rics.csv`)
 - [ ] Download bars for CBOE Dec 2025–Mar 2026 contracts (`all_cboe_contracts.csv`)
-- [ ] Investigate correct RIC format for NDX, SPX, RUT, RUTW index options (see `equity_options/INDEX_RIC_INVESTIGATION.md`)
+- [ ] Investigate expired index option data access for NDX, SPX, RUT, RUTW — RIC format now known (lowercase months + high-strike encoding) but expired data returns all-None on current endpoints. Need to explore other LSEG APIs/tiers. See `equity_options/INDEX_RIC_INVESTIGATION.md`.
 - [ ] Download daily bars (greeks + IV) for all contracts — separate pipeline, retained indefinitely
