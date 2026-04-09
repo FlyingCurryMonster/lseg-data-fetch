@@ -35,7 +35,6 @@ from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
-import lseg.data as ld
 
 load_dotenv()
 
@@ -43,11 +42,13 @@ load_dotenv()
 # Config
 # =====================================================================
 HIST_URL = "https://api.refinitiv.com/data/historical-pricing/v1/views"
+AUTH_URL = "https://api.refinitiv.com/auth/oauth2/v1/token"
 BATCH_SIZE = 10000
 MAX_RETRIES = 5
-INITIAL_RATE = 23.0   # req/sec (limit is 25 for intraday-summaries)
-RATE_BACKOFF = 0.90   # multiply by this on each 429
-MIN_RATE = 0.5
+INITIAL_RATE = 25.0   # req/sec — match LSEG's stated limit, avoid 429 burst at startup
+MAX_RATE     = 50.0   # upper bound for recovery — leave room to probe above 25
+RATE_BACKOFF = 0.80   # multiply by this on each 429 (drop 20%)
+MIN_RATE = 1.0
 
 
 # =====================================================================
@@ -108,12 +109,12 @@ class AdaptiveRateLimiter:
                     self._request_times.append(now)
                     while self._request_times and now - self._request_times[0] > 60:
                         self._request_times.popleft()
-                    # Recover rate by 5% if no 429 in the last 60s and rate is below cap
-                    if (self._rate < INITIAL_RATE
-                            and now - self._last_429_time >= 60.0
-                            and now - self._last_recovery_time >= 60.0):
+                    # Recover rate by 15% if no 429 in the last 15s
+                    if (self._rate < MAX_RATE
+                            and now - self._last_429_time >= 15.0
+                            and now - self._last_recovery_time >= 15.0):
                         old = self._rate
-                        self._rate = min(INITIAL_RATE, self._rate * 1.05)
+                        self._rate = min(MAX_RATE, self._rate * 1.15)
                         self._last_recovery_time = now
                         print(f"\n  *** recovery — rate {old:.2f} → {self._rate:.2f} req/sec ***\n",
                               flush=True)
@@ -150,42 +151,87 @@ class AdaptiveRateLimiter:
 
 
 # =====================================================================
-# Session management (thread-safe)
+# Session management (thread-safe, direct OAuth)
 # =====================================================================
 class TokenManager:
-    def __init__(self, session):
-        self.session = session
-        self._token = session._access_token
-        self._lock = threading.Lock()
+    """Direct OAuth token management — no lseg.data SDK dependency.
 
-    def headers(self):
-        with self._lock:
-            return {"Authorization": f"Bearer {self._token}"}
+    Authenticates via password grant, refreshes via refresh_token grant,
+    falls back to full re-auth, and proactively refreshes before expiry.
+    """
+
+    def __init__(self):
+        self._app_key = os.getenv("DSWS_APPKEY")
+        self._username = os.getenv("DSWS_USERNAME")
+        self._password = os.getenv("DSWS_PASSWORD")
+        self._token = None
+        self._refresh_token_str = None
+        self._token_expiry = 0
+        self._lock = threading.Lock()
+        self._consecutive_401s = 0
+        self.authenticate()
+
+    def authenticate(self):
+        """Get initial token via password grant."""
+        resp = requests.post(AUTH_URL, data={
+            "grant_type": "password",
+            "username": self._username,
+            "password": self._password,
+            "client_id": self._app_key,
+            "scope": "trapi",
+            "takeExclusiveSignOnControl": "true",
+        }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        resp.raise_for_status()
+        data = resp.json()
+        self._token = data["access_token"]
+        self._refresh_token_str = data.get("refresh_token")
+        self._token_expiry = time.time() + int(data.get("expires_in", 300)) - 30
+        self._consecutive_401s = 0
+        print(f"  [auth] Authenticated (token expires in {data.get('expires_in', '?')}s)",
+              flush=True)
 
     def refresh(self):
+        """Refresh token via refresh_token grant, fall back to full re-auth."""
         with self._lock:
-            self._token = self.session._access_token
+            if self._refresh_token_str:
+                try:
+                    resp = requests.post(AUTH_URL, data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": self._refresh_token_str,
+                        "client_id": self._app_key,
+                    }, headers={"Content-Type": "application/x-www-form-urlencoded"})
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        self._token = data["access_token"]
+                        self._refresh_token_str = data.get("refresh_token",
+                                                           self._refresh_token_str)
+                        self._token_expiry = (time.time()
+                                              + int(data.get("expires_in", 300)) - 30)
+                        self._consecutive_401s = 0
+                        print(f"  [auth] Token refreshed "
+                              f"(expires in {data.get('expires_in', '?')}s)",
+                              flush=True)
+                        return
+                except Exception:
+                    pass
+            # Fallback: full re-auth
+            self.authenticate()
 
+    def headers(self):
+        """Return auth headers, proactively refreshing if near expiry."""
+        if time.time() > self._token_expiry:
+            self.refresh()
+        return {"Authorization": f"Bearer {self._token}"}
 
-def setup_session(base_dir):
-    config = {
-        "sessions": {
-            "default": "platform.rdp",
-            "platform": {
-                "rdp": {
-                    "app-key":  os.getenv("DSWS_APPKEY"),
-                    "username": os.getenv("DSWS_USERNAME"),
-                    "password": os.getenv("DSWS_PASSWORD"),
-                    "signon_control": True,
-                }
-            },
-        }
-    }
-    config_path = os.path.join(base_dir, "lseg-data.config.json")
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=4)
-    session = ld.open_session(config_name=config_path)
-    return session, config_path
+    def on_401(self):
+        """Called on 401 response — refresh and track consecutive failures."""
+        with self._lock:
+            self._consecutive_401s += 1
+        self.refresh()
+
+    @property
+    def consecutive_401s(self):
+        return self._consecutive_401s
 
 
 # =====================================================================
@@ -197,14 +243,17 @@ def fetch_bars(tm, rl, ric):
     paginating backwards until no more data.
 
     Returns:
-        (all_rows, num_requests, earliest, latest, field_names)
+        (all_rows, num_requests, earliest, latest, field_names, status)
         field_names: list of column names from the API response headers, or None
+        status: "ok" (got data), "empty" (API returned 200 with no data),
+                "error" (request failed after retries)
     """
     url = f"{HIST_URL}/intraday-summaries/{ric}"
     all_rows = []
     num_requests = 0
     end_param = None
     field_names = None
+    status = "ok"
 
     while True:
         params = {"count": str(BATCH_SIZE)}
@@ -222,7 +271,7 @@ def fetch_bars(tm, rl, ric):
                     time.sleep(2)
                     continue
                 if resp.status_code == 401:
-                    tm.refresh()
+                    tm.on_401()
                     continue
                 break
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
@@ -232,6 +281,7 @@ def fetch_bars(tm, rl, ric):
                 time.sleep(wait)
 
         if resp is None or resp.status_code != 200:
+            status = "error"
             break
 
         data = resp.json()
@@ -257,15 +307,23 @@ def fetch_bars(tm, rl, ric):
 
         end_param = batch_rows[-1][0]
 
+    if status != "error":
+        status = "ok" if all_rows else "empty"
+
     earliest = all_rows[-1][0][:19] if all_rows else ""
     latest   = all_rows[0][0][:19]  if all_rows else ""
-    return all_rows, num_requests, earliest, latest, field_names
+    return all_rows, num_requests, earliest, latest, field_names, status
 
 
 # =====================================================================
 # Resume helpers
 # =====================================================================
 def load_completed(log_file):
+    """Load completed contracts from log. Only treats 'ok' and 'empty' as done.
+
+    Legacy log entries (no 'status' field) are treated as done if requests < MAX_RETRIES,
+    and as needing retry if requests == MAX_RETRIES (likely failed).
+    """
     completed = set()
     if os.path.exists(log_file):
         with open(log_file) as f:
@@ -274,7 +332,17 @@ def load_completed(log_file):
                 if not line:
                     continue
                 try:
-                    completed.add(json.loads(line)["ric"])
+                    entry = json.loads(line)
+                    ric = entry["ric"]
+                    status = entry.get("status")
+                    if status is not None:
+                        # New format: only skip ok/empty
+                        if status in ("ok", "empty"):
+                            completed.add(ric)
+                    else:
+                        # Legacy format: treat max-retry entries as needing retry
+                        if entry.get("requests", 0) < MAX_RETRIES:
+                            completed.add(ric)
                 except (json.JSONDecodeError, KeyError):
                     continue
     return completed
@@ -286,11 +354,12 @@ def load_completed(log_file):
 def worker_task(tm, rl, ric, query_ric, bars_csv, csv_lock, header_event,
                 log_file, log_lock, counters, counter_lock):
     t0 = time.time()
-    rows, num_requests, earliest, latest, field_names = fetch_bars(tm, rl, query_ric)
+    rows, num_requests, earliest, latest, field_names, status = fetch_bars(tm, rl, query_ric)
     elapsed = time.time() - t0
     n = len(rows)
 
-    if rows:
+    # Only write data for clean completions — not errors
+    if rows and status == "ok":
         with csv_lock:
             # Write CSV header on first worker that returns data (once only)
             if field_names and not header_event.is_set():
@@ -306,6 +375,7 @@ def worker_task(tm, rl, ric, query_ric, bars_csv, csv_lock, header_event,
         "ric": ric,
         "query_ric": query_ric,
         "bars": n,
+        "status": status,
         "earliest": earliest,
         "latest": latest,
         "requests": num_requests,
@@ -320,8 +390,10 @@ def worker_task(tm, rl, ric, query_ric, bars_csv, csv_lock, header_event,
         counters["done"] += 1
         counters["total_bars"] += n
         counters["with_data"] += (1 if n > 0 else 0)
+        if status == "error":
+            counters["errors"] = counters.get("errors", 0) + 1
 
-    return ric, n, earliest, latest, elapsed
+    return ric, n, earliest, latest, elapsed, status
 
 
 # =====================================================================
@@ -375,14 +447,13 @@ def main():
         print("Nothing to do!")
         return
 
-    session, config_path = setup_session(base_dir)
-    tm = TokenManager(session)
+    tm = TokenManager()
     rl = AdaptiveRateLimiter(INITIAL_RATE)
 
     csv_lock     = threading.Lock()
     log_lock     = threading.Lock()
     counter_lock = threading.Lock()
-    counters = {"done": 0, "total_bars": 0, "with_data": 0}
+    counters = {"done": 0, "total_bars": 0, "with_data": 0, "errors": 0}
 
     # header_event: set when CSV header has been written (either pre-existing or by first worker)
     header_event = threading.Event()
@@ -412,20 +483,23 @@ def main():
             }
 
             for future in as_completed(futures):
-                ric, n, earliest, latest, elapsed = future.result()
+                ric, n, earliest, latest, elapsed, status = future.result()
 
                 with counter_lock:
                     done       = counters["done"]
                     total_bars = counters["total_bars"]
+                    errors     = counters.get("errors", 0)
 
                 csv_mb    = os.path.getsize(bars_csv) / 1024 / 1024 if os.path.exists(bars_csv) else 0
                 rpm       = rl.requests_per_minute()
                 time_range = f"({earliest[:10]} – {latest[:10]})" if n > 0 else "(no data)"
+                err_tag   = f"  *** ERROR ***" if status == "error" else ""
 
                 print(
                     f"[bars] {done}/{total}  {ric}  {n:,} bars  {time_range}  "
                     f"{elapsed:.1f}s  |  total: {total_bars:,}  CSV: {csv_mb:.0f}MB  "
-                    f"rate: {rl.rate:.1f}/s  rpm: {rpm}",
+                    f"rate: {rl.rate:.1f}/s  rpm: {rpm}"
+                    f"  errors: {errors}" + err_tag,
                     flush=True
                 )
 
@@ -456,18 +530,18 @@ def main():
                     last_progress_log = now
 
     finally:
-        ld.close_session()
-        if os.path.exists(config_path):
-            os.remove(config_path)
+        pass
 
     elapsed_total = time.time() - start_time
     csv_mb = os.path.getsize(bars_csv) / 1024 / 1024 if os.path.exists(bars_csv) else 0
 
+    errors = counters.get("errors", 0)
     summary = (
         f"\n{'='*70}\n"
         f"COMPLETE: {ticker} OM minute bars\n"
         f"  Contracts:         {total:,}\n"
         f"  With data:         {counters['with_data']:,}\n"
+        f"  Errors:            {errors:,}\n"
         f"  Total bars:        {counters['total_bars']:,}\n"
         f"  CSV size:          {csv_mb:.0f} MB\n"
         f"  Elapsed:           {elapsed_total/3600:.2f}h\n"

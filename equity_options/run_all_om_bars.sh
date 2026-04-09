@@ -15,7 +15,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-WORKERS="${1:-8}"
+WORKERS="${1:-32}"
 TICKERS_CSV="all_tickers.csv"
 MASTER_LOG="om_all_run.log"
 
