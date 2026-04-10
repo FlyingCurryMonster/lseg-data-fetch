@@ -181,12 +181,14 @@ ACTIVE=$(ps aux | grep "download_om_minute_bars" | grep -v grep | awk '{print $1
 tail -2 "data/$ACTIVE/om_run.log"
 ```
 
-### Download Status (as of 2026-04-05)
+### Download Status (as of 2026-04-10)
 - **Scale**: 5.9M contracts across 6,570 tickers (OM + CBOE + gap)
-- **Storage**: `data/` symlinked to expansion drive — `data/ → /media/datafeed/Expansion/LSEG-data/intraday options data/data/`. Currently ~202 GB used.
+- **Storage**: `data/` symlinked to expansion drive — `data/ → /media/datafeed/Expansion/LSEG-data/intraday options data/data/`. Currently ~472 GB used.
 - **2-week CSVs**: 61 research-machine tickers preserved as `om_minute_bars_2week.csv` on expansion.
-- **Bars status**: RUNNING — 30 tickers completed, currently on IVV
-- **Trades status**: RUNNING — 1,970 tickers completed, currently on MUR
+- **Bars status**: RUNNING — 34 tickers completed, currently on LLY (3.5K/12.5K contracts, ~190 contracts/min, 0 429s). Orchestrator is grinding through a **second-pass cleanup queue** of ~19 high-volume tickers (TSLA, NOW, ASML, APP, LLY, COIN, IVV, GEV, NVDA, SPOT, CRWD, COST, SLV, INTU, BLK, ISRG, ETHU, TLT, MDB) where ~213K legacy `requests==MAX_RETRIES` entries from a prior token-refresh failure are being retried before resuming fresh tickers. Elevated cleanup throughput (~270 contracts/min) is *not* representative of fresh-download speed (~50 contracts/min on QQQ-class names).
+- **Trades status**: STOPPED — 5,313 tickers completed, no orchestrator currently running.
+- **Rate-limit config** (in `download_om_minute_bars.py`): `INITIAL_RATE=25`, `MAX_RATE=50`, `RATE_BACKOFF=0.80`, recovery 15%/15s. Orchestrator default workers = 32. Tuned after a 48-worker burst hit 14 429s and floored throughput; current config sustains ~50 req/s with 0 429s.
+- **Remaining work**: ~5.06M contracts total (~213K in cleanup queue + ~4.85M in 6,521 untouched tickers).
 - **Zero-bar/tick rates** (systemic across all names):
   - Bars: **71% zero-bar rate** — 1-year retention, most zeros are genuinely untraded contracts (deep OTM, illiquid strikes). Liquid names: SPY 11%, QQQ 23%, IWM 70%, GLD 96%.
   - Trades: **66% zero-tick rate** — 3-month retention means contracts expired >3 months ago always return 0.

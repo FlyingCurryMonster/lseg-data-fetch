@@ -1,6 +1,7 @@
 # Repo Issues Summary
 
-Date: 2026-04-09
+Initial review date: 2026-04-09
+Updated: 2026-04-10
 
 This document summarizes the issues found during a repo review that included:
 - reading the Claude project session logs under `/home/datafeed/.claude/projects/-home-datafeed-market-data-library-lseg-data-fetch`
@@ -15,59 +16,53 @@ The review was primarily static. Python syntax compilation passed, but live LSEG
 - Medium: important operational or portability issue, but not immediate silent corruption
 - Low: documentation drift, usability issue, or tooling weakness
 
-## Confirmed Issues
+## Resolved Since Initial Review
 
-### 1. Equity options minute bars and trades can log request failures as zero-data contracts
+### 1. Equity options minute bars and trades now log explicit contract status
 
-- Severity: High
+- Status: Resolved as of 2026-04-10
 - Area: `equity_options`
 - Files:
   - `equity_options/download_om_minute_bars.py`
   - `equity_options/download_trades.py`
-- Problem:
-  - The fetch loops retry on 429, 401, connection errors, and timeouts.
-  - If retries are exhausted or a non-200 response remains, the code breaks out and returns whatever rows were collected so far.
-  - The worker then logs the contract as completed with `bars=0` or `ticks=0` if no rows were returned, without preserving that the real outcome was an error.
-- Why it matters:
-  - Zero bars can mean "true empty contract" or "request/auth/network failure."
-  - This contaminates resume state and makes later investigation of zero-bar contracts ambiguous.
-- Recommended fix:
-  - Return explicit per-contract status values such as `ok`, `empty`, `auth_error`, `http_error`, `network_error`, `partial_error`.
-  - Only treat `ok` and `empty` as terminal clean outcomes.
+- What changed:
+  - Both intraday downloaders now return and log an explicit `status` value.
+  - Resume logic now only treats `ok` and `empty` entries as cleanly completed.
+  - Legacy log entries are handled with a compatibility rule instead of being blindly trusted.
+- Verification notes:
+  - `fetch_bars()` / `fetch_ticks()` now return `status`.
+  - Worker log entries now include `"status": ...`.
+  - `load_completed()` now checks `status` before deciding a contract is done.
 
-### 2. Equity options fetchers can write partial contract data and still mark the contract done
+### 2. Equity options no longer write partial contract data on errored fetches
 
-- Severity: High
+- Status: Resolved as of 2026-04-10
 - Area: `equity_options`
 - Files:
   - `equity_options/download_om_minute_bars.py`
   - `equity_options/download_trades.py`
-- Problem:
-  - If pagination succeeds for some pages and later fails, the code still returns the partial rows already accumulated.
-  - The worker writes those rows to CSV and logs the contract as complete.
-- Why it matters:
-  - A contract can be partially downloaded with no reliable indication that history is incomplete.
-- Recommended fix:
-  - Buffer rows in memory and only write them if the contract completed cleanly.
-  - If any page fails terminally, log the contract as errored and do not append partial output.
+- What changed:
+  - Workers now only append rows to CSV when the contract finished with `status == "ok"`.
+  - Errored contracts are logged but their partial rows are not written out as if complete.
+- Verification notes:
+  - Both workers gate CSV writes on `if rows and status == "ok":`.
 
-### 3. Equity options token refresh path is not robust enough for long runs
+### 3. Equity options token handling now uses direct OAuth instead of the old SDK token copy path
 
-- Severity: High
+- Status: Resolved as of 2026-04-10
 - Area: `equity_options`
 - Files:
   - `equity_options/download_om_minute_bars.py`
   - `equity_options/download_trades.py`
-  - `shared/lseg_rest_api.py`
-- Problem:
-  - On 401, the minute-bar and trades downloaders call a local `refresh()` method that only rereads `session._access_token`.
-  - That does not guarantee the SDK has actually refreshed the token.
-  - `shared/lseg_rest_api.py` is stronger because it attempts `update_access_token()`, but the intraday downloaders do not.
-- Why it matters:
-  - Long-running jobs can drift into auth failure and quietly produce zero-data or incomplete results.
-- Recommended fix:
-  - Call the SDK refresh method if available, or reopen the session on 401 before retrying.
-  - Treat repeated 401s as explicit contract/job errors, not empty data.
+- What changed:
+  - The intraday downloaders now use direct OAuth password-grant + refresh-token handling.
+  - 401 responses call `tm.on_401()`, which refreshes or fully re-authenticates.
+  - The old `session._access_token` copy pattern is no longer used in these scripts.
+- Verification notes:
+  - `AUTH_URL` is now used directly in both files.
+  - `TokenManager` has `authenticate()`, `refresh()`, and `on_401()`.
+
+## Open Issues
 
 ### 4. Equity options resume logic is keyed too loosely and blocks reruns after `query_ric` corrections
 
@@ -76,7 +71,6 @@ The review was primarily static. Python syntax compilation passed, but live LSEG
 - Files:
   - `equity_options/download_om_minute_bars.py`
   - `equity_options/download_trades.py`
-  - `equity_options/INDEX_RIC_INVESTIGATION.md`
 - Problem:
   - Completed state is keyed only by `ric` / `base_ric` in the log-based resume helper.
   - If `contracts.csv` later contains a corrected `query_ric`, the contract still gets skipped because the base RIC already exists in the log.
@@ -87,7 +81,7 @@ The review was primarily static. Python syntax compilation passed, but live LSEG
   - Make resume state compare both `base_ric` and the currently expected `query_ric`.
   - Rerun when the current `query_ric` differs from the most recent successful log entry.
 
-### 5. Equity options need a deliberate zero-bar recheck workflow
+### 5. Equity options still need a deliberate zero-bar recheck workflow
 
 - Severity: High
 - Area: `equity_options`
@@ -96,7 +90,8 @@ The review was primarily static. Python syntax compilation passed, but live LSEG
   - `equity_options/CLAUDE.md`
   - `equity_options/INDEX_RIC_INVESTIGATION.md`
 - Problem:
-  - The project now has many historical `bars=0` entries, but the current log format does not distinguish true empty contracts from fetch failures.
+  - The project now has many historical `bars=0` entries from before the status-logging fix.
+  - Current logs are better, but legacy zero-bar outcomes are still ambiguous.
   - Some zero-bar clusters are likely real, but others may reflect bad RICs or transient failures.
 - Why it matters:
   - The existing dataset likely contains a mix of real empties and false empties.
@@ -261,14 +256,14 @@ The review was primarily static. Python syntax compilation passed, but live LSEG
 
 ## Suggested Fix Order
 
-1. Patch equity-options fetch status handling and partial-write behavior.
-2. Patch equity-options token refresh and resume logic.
-3. Add a zero-bar recheck workflow for prior logs.
-4. Patch the bond master overflow logic.
-5. Remove remaining old absolute paths in gap-RIC helpers.
-6. Clean up stale docs and clarify which scripts are active vs historical.
+1. Patch equity-options resume logic so corrected `query_ric` values rerun automatically.
+2. Add a zero-bar recheck workflow for prior legacy logs.
+3. Patch the bond master overflow logic.
+4. Remove remaining old absolute paths in gap-RIC helpers.
+5. Clean up stale docs and clarify which scripts are active vs historical.
+6. Add focused unit tests around resume-state interpretation and contract status handling.
 
 ## Notes
 
-- The most important practical issue in the repo is not documentation drift. It is that the current intraday downloader can confuse request failures with true zero-data contracts.
-- If work resumes on the equity-options jobs, the downloader should be patched before trusting new `bars=0` or `ticks=0` outcomes.
+- The most important remaining equity-options issue is no longer token handling or status logging. It is resume correctness when `query_ric` changes, plus a clean recheck path for legacy zero-bar contracts.
+- New intraday logs are materially safer than the old ones, but historical zero-bar outcomes still need review before being trusted.
