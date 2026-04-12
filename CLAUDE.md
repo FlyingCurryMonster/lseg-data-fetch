@@ -216,6 +216,13 @@ Key scripts:
 - `download_div_options.py` — daily prices for dividend options
 - `build_secmaster.py` — links LSEG RICs to CRSP PERMNOs
 
+### Eurex Single Stock Products
+Eurex lists **93 US single stock futures** and **57 US single stock dividend futures**
+on names like AAPL, MSFT, AMZN, NVDA, META, JPM, KO, PG, etc. Full product lists,
+Eurex IDs, and Reuters chain RICs are documented in `EUREX_SINGLE_STOCK.md`.
+**Status**: Product list confirmed via Eurex CSV (2026-04-12). LSEG API access and
+RIC format not yet tested — need to probe `get_history()` on sample contracts.
+
 ---
 
 ## Credit (`credit/`)
@@ -256,7 +263,8 @@ lseg data fetch/
 │   ├── download_div_futures.py       # daily OHLCV
 │   ├── download_div_options.py       # daily prices
 │   ├── build_secmaster.py            # RIC → PERMNO mapping
-│   └── NOTES.md
+│   ├── NOTES.md
+│   └── EUREX_SINGLE_STOCK.md        # 93 US SSFs + 57 US SSDFs — product lists & RICs
 ├── equity_options/
 │   ├── download_om_minute_bars.py    # main bar download script
 │   ├── download_trades.py            # trade tick downloader
