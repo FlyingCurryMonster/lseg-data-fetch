@@ -206,12 +206,12 @@ tail -2 "data/$ACTIVE/om_run.log"
 
 ## Dividend Derivatives (`dividend_derivatives/`)
 
-Scripts for enumerating and downloading daily prices for dividend futures (SDA/SDI/FEXD)
-and options on S&P 500 index dividends.
+Scripts for enumerating and downloading daily prices for dividend futures (SDA/SDI/FEXD
++ 341 Eurex single stock dividend futures) and options on S&P 500 index dividends.
 
 Key scripts:
-- `enumerate_div_contracts*.py` — discover SDA/SDI/FEXD contracts via LSEG search
-- `build_div_master.py` — build clean futures/options master files
+- `enumerate_div_contracts*.py` — discover SDA/SDI/FEXD + SSDF contracts via LSEG search
+- `build_div_master.py` — build clean futures/options master files (product-agnostic)
 - `download_div_futures.py` — daily OHLCV for dividend futures
 - `download_div_options.py` — daily prices for dividend options
 - `build_secmaster.py` — links LSEG RICs to CRSP PERMNOs
