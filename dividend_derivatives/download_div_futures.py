@@ -41,9 +41,17 @@ ld.open_session(config_name=config_path)
 master = pd.read_csv("instrument_master_futures.csv")
 all_rics = master["RIC"].tolist()
 print(f"Total futures to download: {len(all_rics)}")
-print(f"  SDA: {(master['product'] == 'SDA').sum()}")
-print(f"  SDI: {(master['product'] == 'SDI').sum()}")
-print(f"  FEXD: {(master['product'] == 'FEXD').sum()}")
+if "ProductGroup" in master.columns:
+    index = master[master["ProductGroup"] == "INDEX"]
+    for product, count in index.groupby("product").size().items():
+        print(f"  {product}: {count}")
+    for group in ["SSDF", "SSF"]:
+        group_rows = master[master["ProductGroup"] == group]
+        if not group_rows.empty:
+            print(f"  {group}: {len(group_rows)} contracts across {group_rows['product'].nunique()} products")
+else:
+    for product, count in master.groupby("product").size().items():
+        print(f"  {product}: {count}")
 
 end = datetime.now().strftime("%Y-%m-%d")
 start = "2005-01-01"
@@ -111,11 +119,23 @@ if all_data:
     print(f"Unique RICs with data: {result['RIC'].nunique()}")
     print(f"\nBy product:")
     result["date"] = pd.to_datetime(result["date"])
-    for product in ["SDA", "SDI", "FEXD"]:
+    result_with_group = result.merge(master[["RIC", "ProductGroup"]].drop_duplicates(), on="RIC", how="left") if "ProductGroup" in master.columns else result
+    bulk_products = set()
+    if "ProductGroup" in result_with_group.columns:
+        for group in ["SSDF", "SSF"]:
+            bulk_products |= set(result_with_group[result_with_group["ProductGroup"] == group]["product"].unique())
+    for product in sorted(result["product"].unique()):
+        if product in bulk_products:
+            continue
         subset = result[result["product"] == product]
         if not subset.empty:
             print(f"  {product}: {subset['RIC'].nunique()} RICs, {len(subset)} rows, "
                   f"dates: {subset['date'].min()} to {subset['date'].max()}")
+    if "ProductGroup" in result_with_group.columns:
+        for group in ["SSDF", "SSF"]:
+            g = result_with_group[result_with_group["ProductGroup"] == group]
+            if not g.empty:
+                print(f"  {group}: {g['product'].nunique()} products, {g['RIC'].nunique()} RICs, {len(g)} rows")
 
     result.to_csv("futures_daily_prices.csv", index=False)
     print(f"\nSaved to futures_daily_prices.csv")

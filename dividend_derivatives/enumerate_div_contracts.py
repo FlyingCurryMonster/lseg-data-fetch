@@ -94,8 +94,16 @@ def load_completed_products(csv_path):
     return set()
 
 
+COLUMNS = ["DocumentTitle", "RIC", "ExchangeName", "AssetCategory", "AssetState",
+           "ExpiryDate", "StrikePrice", "Product", "ProductName", "ProductGroup"]
+
+
 def append_to_csv(df, csv_path):
-    """Append a DataFrame to the output CSV, writing header if file doesn't exist."""
+    """Append a DataFrame to the output CSV with consistent columns."""
+    for col in COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+    df = df[COLUMNS]
     write_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
     df.to_csv(csv_path, mode="a", header=write_header, index=False)
 
