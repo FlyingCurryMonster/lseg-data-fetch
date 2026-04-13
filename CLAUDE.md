@@ -206,22 +206,57 @@ tail -2 "data/$ACTIVE/om_run.log"
 
 ## Dividend Derivatives (`dividend_derivatives/`)
 
-Scripts for enumerating and downloading daily prices for dividend futures (SDA/SDI/FEXD
-+ 341 Eurex single stock dividend futures) and options on S&P 500 index dividends.
+Scripts for enumerating and downloading daily prices for Eurex single stock futures,
+single stock dividend futures, and index dividend futures/options.
+
+### Pipeline
+
+```
+enumerate_div_contracts.py SSDF SSF [INDEX]
+    └─> enumerated_futures.csv
+
+build_div_master.py [file1.csv ...]
+    └─> instrument_master_futures.csv
+
+download_div_futures.py [--master PATH] [--workers N]
+    └─> futures_daily_prices.csv + futures_download_log.jsonl
+```
 
 Key scripts:
-- `enumerate_div_contracts*.py` — discover SDA/SDI/FEXD + SSDF contracts via LSEG search
-- `build_div_master.py` — build clean futures/options master files (product-agnostic)
-- `download_div_futures.py` — daily OHLCV for dividend futures
+- `enumerate_div_contracts.py GROUP [GROUP...]` — enumerate contracts via LSEG Discovery
+  Search REST API. Groups: `INDEX` (SDA/SDI/FEXD), `SSDF`, `SSF`. Uses `TokenManager`
+  for token refresh, incremental CSV save, resume by product ID.
+- `build_div_master.py [file.csv ...]` — clean enumerated data into instrument master.
+  Removes chains, continuations, spreads, dupes. Joins underlying name from Eurex CSV.
+  Prints verification of what each filter removed.
+- `build_options_master.py [file.csv ...]` — same pattern for options master (separated
+  from futures master).
+- `download_div_futures.py` — daily pricing via REST interday-summaries endpoint.
+  Uses `TokenManager`, parallel workers (default 10), JSONL resume log. Safe to kill/restart.
 - `download_div_options.py` — daily prices for dividend options
 - `build_secmaster.py` — links LSEG RICs to CRSP PERMNOs
+- `enumerate_expired_div.py` — enumerate expired INDEX futures/options (SDA/SDI/FEXD only)
+
+### Download Status (as of 2026-04-13)
+
+**SSF + SSDF daily prices — COMPLETE**
+- Source: Eurex product list CSV (1,652 products: 341 SSDF + 1,311 SSF)
+- Enumerated: 133,618 raw rows → 53,046 clean contracts (318 SSDF products, 1,240 SSF products)
+- Downloaded: **12.85M rows, 884 MB** across 52,662 RICs (384 empty, 0 errors)
+- Date range: 2005–present (varies by contract)
+- Time: 45 minutes with 10 parallel workers
+- Columns: `date, TRDPRC_1, OPEN_PRC, HIGH_1, LOW_1, ACVOL_UNS, BID, ASK, OPINT_1,
+  TOTCNTRVOL, TOTCNTROI, SETTLE, IMP_YIELD, EDSP, NUM_MOVES, VWAP, ORDBK_VOL,
+  OFFBK_VOL, MID_PRICE, EXPIR_DATE, CRT_MNTH, SETL_PCHNG, SETL_NCHNG, RIC`
+- Files: `futures_daily_prices.csv`, `futures_download_log.jsonl`, `instrument_master_futures.csv`
+
+**Index dividend futures (SDA/SDI/FEXD)** — previously downloaded, 121K rows / 79 RICs.
+Exists at `~/rnb76-rclone/datasci-mini-projects/tail-strats/datafiles/div_futures_daily_prices.csv`.
 
 ### Eurex Single Stock Products
 Eurex lists **93 US single stock futures** and **57 US single stock dividend futures**
 on names like AAPL, MSFT, AMZN, NVDA, META, JPM, KO, PG, etc. Full product lists,
 Eurex IDs, and Reuters chain RICs are documented in `EUREX_SINGLE_STOCK.md`.
-**Status**: Product list confirmed via Eurex CSV (2026-04-12). LSEG API access and
-RIC format not yet tested — need to probe `get_history()` on sample contracts.
 
 ---
 
@@ -237,6 +272,8 @@ Bond/credit market data via LSEG REST API.
 ## Shared Utilities (`shared/`)
 
 - `lseg_rest_api.py` — REST client used by 14 scripts across all sub-projects
+- `token_manager.py` — standalone OAuth token management (password grant + refresh_token
+  grant + proactive refresh). Used by `enumerate_div_contracts.py` and `download_div_futures.py`.
 - `__init__.py` — provides `REPO_ROOT`, `ENV_PATH` helpers
 
 Import pattern from any subdirectory:
@@ -256,13 +293,17 @@ lseg data fetch/
 ├── BOND_DATA_RESEARCH.md
 ├── shared/
 │   ├── __init__.py
-│   └── lseg_rest_api.py             # REST client (14 importers)
+│   ├── lseg_rest_api.py             # REST client (14 importers)
+│   └── token_manager.py             # standalone OAuth token manager
 ├── dividend_derivatives/
-│   ├── enumerate_div_contracts*.py   # SDA/SDI/FEXD discovery
-│   ├── build_div_master.py           # master file builder
-│   ├── download_div_futures.py       # daily OHLCV
-│   ├── download_div_options.py       # daily prices
+│   ├── enumerate_div_contracts.py    # SSF/SSDF/INDEX enumeration (REST + TokenManager)
+│   ├── build_div_master.py           # futures master builder (CLI args for input CSVs)
+│   ├── build_options_master.py       # options master builder (separated from futures)
+│   ├── download_div_futures.py       # daily OHLCV (REST + TokenManager + parallel)
+│   ├── download_div_options.py       # daily prices for options
+│   ├── enumerate_expired_div.py      # expired INDEX futures/options enumeration
 │   ├── build_secmaster.py            # RIC → PERMNO mapping
+│   ├── eurex_productlist.csv         # Eurex full product list (semicolon-delimited)
 │   ├── NOTES.md
 │   └── EUREX_SINGLE_STOCK.md        # 93 US SSFs + 57 US SSDFs — product lists & RICs
 ├── equity_options/
