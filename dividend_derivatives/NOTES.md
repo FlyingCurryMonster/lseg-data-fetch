@@ -253,7 +253,7 @@ resp = requests.post(
     }
 )
 ```
-See `explore_ric_history.py` for full working example.
+See `../security_master/explore_ric_history.py` for a working example.
 
 ### LSEG security master limitations
 - Only returns **current state** — no historical name/ticker changes
@@ -326,12 +326,12 @@ The direct search endpoint requires a `View` field in the POST body. Default: `S
 | `test_dividend_futures.py` | Sample data download for SDA/SDI futures + options | `LSEG datastream/` |
 | `explore_fields.py` | Field exploration v1 (metadata, history depth) | `LSEG datastream/` |
 | `explore_fields_v2.py` | Field exploration v2 (discovery.search metadata, Chain test) | `LSEG datastream/` |
-| `explore_symbology.py` | Symbology v1: convert_symbols, CUSIP/ISIN/SEDOL/PermID | `LSEG datastream/` |
-| `explore_symbology_v2.py` | Symbology v2: bulk conversion, CUSIP→RIC, CRSP cross-reference | `LSEG datastream/` |
-| `explore_secmaster.py` | Security master: META/CRSP cross-reference, 50-stock bulk test | `LSEG datastream/` |
-| `explore_ric_history.py` | Historical RICs via REST symbology API (showHistory, effectiveAt) | `LSEG datastream/` |
+| `explore_symbology.py` | Symbology v1: convert_symbols, CUSIP/ISIN/SEDOL/PermID | `security_master/` |
+| `explore_symbology_v2.py` | Symbology v2: bulk conversion, CUSIP→RIC, CRSP cross-reference | `security_master/` |
+| `explore_secmaster.py` | Security master: META/CRSP cross-reference, 50-stock bulk test | `security_master/` |
+| `explore_ric_history.py` | Historical RICs via REST symbology API (showHistory, effectiveAt) | `security_master/` |
 | `build_instrument_master.py` | Build clean instrument masters from enumeration CSVs | `LSEG datastream/` |
-| `build_secmaster.py` | Security master: LSEG→CRSP join via CUSIP, RIC history | `LSEG datastream/` |
+| `build_secmaster.py` | Security master: US snapshot + separate RIC-history sidecar | `security_master/` |
 | `download_futures_retry.py` | Download daily pricing for all dividend futures | `LSEG datastream/` |
 | `download_options_prices.py` | Download daily pricing for all active dividend options | `LSEG datastream/` |
 | `enumerate_instruments.py` | Enumerate active futures + SDA options (v1) | `LSEG datastream/` |

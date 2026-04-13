@@ -209,8 +209,28 @@ tail -2 "data/$ACTIVE/om_run.log"
 Dividend-distribution event work now lives under [`div_distribution_data/`](./div_distribution_data/),
 with current notes in [`div_distribution_data/DIV_DISTRIBUTION_DATA.md`](./div_distribution_data/DIV_DISTRIBUTION_DATA.md).
 
-The older Eurex dividend futures/options, symbology, and security-master research scripts
-still live under `dividend_derivatives/` and have not been fully reorganized yet.
+Security-master and symbology work now lives under [`security_master/`](./security_master/),
+with canonical notes in [`security_master/SECURITY_MASTER.md`](./security_master/SECURITY_MASTER.md).
+
+The older Eurex dividend futures/options and underlier-universe work remain in
+`dividend_derivatives/`.
+
+## Security Master (`security_master/`)
+
+Scripts for bridging CRSP identifiers to LSEG-friendly identifiers.
+
+Current deliverables:
+- `build_secmaster.py` — builds a US snapshot table plus a separate primary-RIC history sidecar
+- `explore_secmaster.py` — spot-check join logic and metadata coverage
+- `explore_symbology.py` / `explore_symbology_v2.py` — validate symbology field coverage and CUSIP/ISIN mapping
+- `explore_ric_history.py` — validates `showHistory` / `effectiveAt` behavior via REST symbology
+
+Identifier strategy:
+- US anchor: `permno`
+- US crosswalk key: `crsp_cusip8`
+- Canonical LSEG-friendly identifier: `isin`
+- Stable LSEG-side identifier: `permid`
+- Market-facing alias: `primary_ric`
 
 ## Dividend Derivatives (`dividend_derivatives/`)
 
@@ -242,7 +262,6 @@ Key scripts:
 - `download_div_futures.py` — daily pricing via REST interday-summaries endpoint.
   Uses `TokenManager`, parallel workers (default 10), JSONL resume log. Safe to kill/restart.
 - `download_div_options.py` — daily prices for dividend options
-- `build_secmaster.py` — links LSEG RICs to CRSP PERMNOs
 - `enumerate_expired_div.py` — enumerate expired INDEX futures/options (SDA/SDI/FEXD only)
 
 ### Download Status (as of 2026-04-13)
@@ -303,6 +322,17 @@ lseg data fetch/
 │   ├── __init__.py
 │   ├── lseg_rest_api.py             # REST client (14 importers)
 │   └── token_manager.py             # standalone OAuth token manager
+├── security_master/
+│   ├── SECURITY_MASTER.md           # canonical notes for identifier strategy
+│   ├── build_secmaster.py           # US snapshot + RIC history sidecar
+│   ├── explore_secmaster.py
+│   ├── explore_symbology.py
+│   ├── explore_symbology_v2.py
+│   └── explore_ric_history.py
+├── div_distribution_data/
+│   ├── DIV_DISTRIBUTION_DATA.md     # dividend event / ex-date notes
+│   ├── test_div_distributions.py    # LSEG dividend/corporate-action field probes
+│   └── cross_check_divs.py          # CRSP vs LSEG validation
 ├── dividend_derivatives/
 │   ├── enumerate_div_contracts.py    # SSF/SSDF/INDEX enumeration (REST + TokenManager)
 │   ├── build_div_master.py           # futures master builder (CLI args for input CSVs)
@@ -310,7 +340,6 @@ lseg data fetch/
 │   ├── download_div_futures.py       # daily OHLCV (REST + TokenManager + parallel)
 │   ├── download_div_options.py       # daily prices for options
 │   ├── enumerate_expired_div.py      # expired INDEX futures/options enumeration
-│   ├── build_secmaster.py            # RIC → PERMNO mapping
 │   ├── eurex_productlist.csv         # Eurex full product list (semicolon-delimited)
 │   ├── NOTES.md
 │   └── EUREX_SINGLE_STOCK.md        # 93 US SSFs + 57 US SSDFs — product lists & RICs
