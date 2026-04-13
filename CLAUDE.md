@@ -204,6 +204,14 @@ tail -2 "data/$ACTIVE/om_run.log"
 
 ---
 
+## Dividend Derivatives / Dividend Distribution
+
+Dividend-distribution event work now lives under [`div_distribution_data/`](./div_distribution_data/),
+with current notes in [`div_distribution_data/DIV_DISTRIBUTION_DATA.md`](./div_distribution_data/DIV_DISTRIBUTION_DATA.md).
+
+The older Eurex dividend futures/options, symbology, and security-master research scripts
+still live under `dividend_derivatives/` and have not been fully reorganized yet.
+
 ## Dividend Derivatives (`dividend_derivatives/`)
 
 Scripts for enumerating and downloading daily prices for Eurex single stock futures,
