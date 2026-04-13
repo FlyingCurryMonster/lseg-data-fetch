@@ -93,3 +93,12 @@ That work remains in `dividend_derivatives/`, especially:
 
 This directory consumes those universes later for validation, but does not
 generate them.
+
+## Temporary Archive
+
+`security_master/eurex_ssf_ssdf/` is a holding area for the current generic
+SSF/SSDF output artifacts copied out of `dividend_derivatives/` before they get
+overwritten by a later pipeline run.
+
+These archived files are for safekeeping only. The active generation pipeline
+and its canonical scripts still live in `dividend_derivatives/`.

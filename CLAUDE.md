@@ -224,6 +224,8 @@ Current deliverables:
 - `explore_secmaster.py` — spot-check join logic and metadata coverage
 - `explore_symbology.py` / `explore_symbology_v2.py` — validate symbology field coverage and CUSIP/ISIN mapping
 - `explore_ric_history.py` — validates `showHistory` / `effectiveAt` behavior via REST symbology
+- `eurex_ssf_ssdf/` — temporary archive of current SSF/SSDF output artifacts copied out of
+  `dividend_derivatives/` for safekeeping; not the active pipeline location
 
 Identifier strategy:
 - US anchor: `permno`
@@ -328,7 +330,8 @@ lseg data fetch/
 │   ├── explore_secmaster.py
 │   ├── explore_symbology.py
 │   ├── explore_symbology_v2.py
-│   └── explore_ric_history.py
+│   ├── explore_ric_history.py
+│   └── eurex_ssf_ssdf/              # temporary archive of current SSF/SSDF outputs
 ├── div_distribution_data/
 │   ├── DIV_DISTRIBUTION_DATA.md     # dividend event / ex-date notes
 │   ├── test_div_distributions.py    # LSEG dividend/corporate-action field probes
