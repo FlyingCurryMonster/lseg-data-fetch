@@ -91,6 +91,7 @@ Purpose:
   complete stock universe that has `permno`
 - this is the canonical US-side event history
 - this is where split / adjustment factor logic lives
+- this is the first event-history build step
 
 Source:
 
@@ -154,7 +155,9 @@ Purpose:
 
 - build one canonical LSEG dividend-history file for the complete stock universe
 - cover both CRSP-overlap names and Eurex-only non-US names
-- build the CRSP-vs-LSEG comparison layer for all overlap names with `permno`
+- this is the second event-history build step
+- after the full LSEG event file exists, build the CRSP-vs-LSEG comparison layer
+  for all overlap names with `permno`
 
 Source:
 
@@ -201,6 +204,14 @@ The comparison file `crsp_vs_lseg_distribution_compare.csv` is keyed on:
 - `permno`
 - `share_isin`
 - `ex_date`
+
+Comparison sequencing:
+
+- step 1: build `us_crsp_distribution_events.csv`
+- step 2: build `complete_lseg_distribution_events.csv` for the full complete
+  stock universe
+- step 3: build `crsp_vs_lseg_distribution_compare.csv` only on the overlap set
+  where `permno` exists
 
 Important comparison fields:
 
