@@ -336,17 +336,6 @@ def collapse_contract_lookup(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def normalize_csv_row(row: list[str], header_len: int) -> list[str]:
-    if len(row) == header_len:
-        return row
-    if len(row) < header_len:
-        return row + [""] * (header_len - len(row))
-
-    # Some raw daily-price rows contain extra empty fields immediately before the
-    # final RIC column. Keep the first N-1 data columns and the last field as RIC.
-    return row[: header_len - 1] + [row[-1]]
-
-
 def write_enriched_prices_csv(prices_path: str, lookup_df: pd.DataFrame, out_path: str) -> None:
     lookup_cols = [
         "product",
@@ -374,17 +363,31 @@ def write_enriched_prices_csv(prices_path: str, lookup_df: pd.DataFrame, out_pat
     )
 
     with open(prices_path, newline="") as src, open(out_path, "w", newline="") as dst:
-        reader = csv.reader(src)
-        writer = csv.writer(dst)
+        reader = csv.DictReader(src)
+        header = reader.fieldnames or []
+        missing = [col for col in ("date", "RIC") if col not in header]
+        if missing:
+            raise ValueError(f"Raw prices file missing required columns: {missing}")
 
-        header = next(reader)
-        writer.writerow(header + lookup_cols)
+        writer = csv.DictWriter(dst, fieldnames=header + lookup_cols)
+        writer.writeheader()
 
-        for row in reader:
-            fixed = normalize_csv_row(row, len(header))
-            ric = fixed[-1]
+        for line_no, row in enumerate(reader, start=2):
+            if None in row:
+                raise ValueError(
+                    f"{prices_path}: line {line_no} contains extra unnamed columns: {row[None]}"
+                )
+
+            ric = row.get("RIC", "")
+            if not ric:
+                raise ValueError(f"{prices_path}: blank RIC at line {line_no}")
+            if not row.get("date"):
+                raise ValueError(f"{prices_path}: blank date at line {line_no}")
+
             extra = lookup.get(ric, {})
-            writer.writerow(fixed + [extra.get(col, "") for col in lookup_cols])
+            out_row = {col: row.get(col, "") or "" for col in header}
+            out_row.update({col: extra.get(col, "") for col in lookup_cols})
+            writer.writerow(out_row)
 
 
 def main() -> None:
