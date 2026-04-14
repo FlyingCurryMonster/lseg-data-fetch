@@ -16,10 +16,11 @@ Outputs (written to this directory by default):
   - us_security_master_unmatched.csv
 
 Workflow:
-  1. Pull the current US ordinary-share universe from LSEG.
-  2. Join CRSP rows to LSEG on cusip8 = lseg_cusip9[:8].
-  3. Build a current snapshot keyed by PERMNO.
-  4. Fetch primary-RIC history by ISIN and write it as a separate sidecar.
+  1. Export a current CRSP snapshot with one row per PERMNO.
+  2. Convert CRSP CUSIP9 values through LSEG symbology in batches.
+  3. Join CRSP rows to LSEG on cusip8 = lseg_cusip9[:8].
+  4. Build a current snapshot keyed by PERMNO.
+  5. Fetch primary-RIC history by ISIN and write it as a separate sidecar.
 """
 
 from __future__ import annotations
@@ -43,12 +44,7 @@ from shared.lseg_rest_api import LSEGRestClient
 load_dotenv()
 
 
-SEARCH_FIELDS = (
-    "RIC,Cusip,Isin,PermID,TickerSymbol,CommonName,"
-    "ExchangeCode,ExchangeName,AssetCategory,AssetState,CountryCode"
-)
-SEARCH_FILTER = "AssetCategory eq 'Ordinary Shares' and CountryCode eq 'USA'"
-DEFAULT_TOP = 10000
+DEFAULT_CONVERT_BATCH_SIZE = 500
 DEFAULT_BATCH_SLEEP = 0.2
 
 RAW_UNIVERSE_CSV = "us_lseg_equity_universe_raw.csv"
@@ -72,10 +68,10 @@ def parse_args() -> argparse.Namespace:
         help="Directory for output CSVs (default: security_master/)",
     )
     parser.add_argument(
-        "--search-top",
+        "--convert-batch-size",
         type=int,
-        default=DEFAULT_TOP,
-        help="Max LSEG rows to request for the US equity universe",
+        default=DEFAULT_CONVERT_BATCH_SIZE,
+        help="Batch size for LSEG CUSIP->identifier conversion",
     )
     parser.add_argument(
         "--history-limit",
@@ -122,6 +118,41 @@ def normalize_cusip8(value: object) -> str | None:
     return cleaned[:8]
 
 
+def cusip_check_digit(cusip8: str) -> str | None:
+    if not cusip8 or len(cusip8) != 8:
+        return None
+
+    total = 0
+    for idx, ch in enumerate(cusip8, start=1):
+        if ch.isdigit():
+            value = int(ch)
+        elif "A" <= ch <= "Z":
+            value = ord(ch) - 55
+        elif ch == "*":
+            value = 36
+        elif ch == "@":
+            value = 37
+        elif ch == "#":
+            value = 38
+        else:
+            return None
+
+        if idx % 2 == 0:
+            value *= 2
+        total += (value // 10) + (value % 10)
+
+    return str((10 - (total % 10)) % 10)
+
+
+def cusip8_to_cusip9(cusip8: str | None) -> str | None:
+    if not cusip8:
+        return None
+    check = cusip_check_digit(cusip8)
+    if check is None:
+        return None
+    return f"{cusip8}{check}"
+
+
 def require_columns(df: pd.DataFrame, required: list[str], label: str) -> None:
     missing = [col for col in required if col not in df.columns]
     if missing:
@@ -145,6 +176,7 @@ def load_crsp_snapshot(path: str) -> pd.DataFrame:
     df = df.copy()
     df["permno"] = df["permno"].astype(str).str.strip()
     df["crsp_cusip8"] = df[cusip_col].apply(normalize_cusip8)
+    df["crsp_cusip9"] = df["crsp_cusip8"].apply(cusip8_to_cusip9)
     df = df[df["permno"] != ""].copy()
 
     if df["permno"].duplicated().any():
@@ -157,30 +189,79 @@ def load_crsp_snapshot(path: str) -> pd.DataFrame:
     return df
 
 
-def fetch_lseg_us_equity_universe(rest: LSEGRestClient, top: int) -> pd.DataFrame:
-    result = rest.search(
-        query="",
-        filter=SEARCH_FILTER,
-        select=SEARCH_FIELDS,
-        top=top,
-        view="EquityQuotes",
-    )
-    total = result.get("Total", 0)
-    hits = result.get("Hits", [])
+def parse_document_title(value: object) -> tuple[str | None, str | None]:
+    if value is None or pd.isna(value):
+        return None, None
+    text = str(value).strip()
+    if not text:
+        return None, None
+    parts = [part.strip() for part in text.split(",")]
+    common_name = parts[0] if parts else None
+    exchange_name = parts[-1] if len(parts) >= 2 else None
+    return common_name, exchange_name
 
-    if total > top:
-        raise RuntimeError(
-            f"LSEG search returned Total={total}, exceeding top={top}. "
-            "Increase --search-top or implement segmented fetch before proceeding."
+
+def fetch_lseg_us_equity_universe(crsp_df: pd.DataFrame, batch_size: int) -> pd.DataFrame:
+    work = crsp_df[["crsp_cusip8", "crsp_cusip9"]].dropna().drop_duplicates()
+    cusips = work["crsp_cusip9"].tolist()
+    frames = []
+
+    total = len(cusips)
+    for start in range(0, total, batch_size):
+        batch = cusips[start:start + batch_size]
+        batch_no = start // batch_size + 1
+        batch_total = (total + batch_size - 1) // batch_size
+        print(
+            f"[convert] batch {batch_no}/{batch_total} ({len(batch)} CUSIPs)",
+            flush=True,
         )
 
-    if not hits:
-        raise RuntimeError("LSEG search returned no US ordinary-share rows")
+        result = ld.discovery.convert_symbols(
+            symbols=batch,
+            from_symbol_type=ld.discovery.SymbolTypes.CUSIP,
+            to_symbol_types=[
+                ld.discovery.SymbolTypes.RIC,
+                ld.discovery.SymbolTypes.ISIN,
+                ld.discovery.SymbolTypes.TICKER_SYMBOL,
+                ld.discovery.SymbolTypes.OA_PERM_ID,
+            ],
+        )
+        if result is None or result.empty:
+            continue
 
-    df = pd.DataFrame(hits)
-    df["lseg_cusip9"] = df.get("Cusip", pd.Series(dtype=str)).astype(str).str.strip()
-    df["lseg_cusip8"] = df["lseg_cusip9"].apply(normalize_cusip8)
-    return df
+        df = result.reset_index().rename(columns={"index": "lseg_cusip9"}).copy()
+        df["lseg_cusip9"] = df["lseg_cusip9"].astype(str).str.strip()
+        df["lseg_cusip8"] = df["lseg_cusip9"].apply(normalize_cusip8)
+        parsed = df.get("DocumentTitle", pd.Series(dtype=str)).apply(parse_document_title)
+        df["CommonName"] = parsed.apply(lambda item: item[0] if isinstance(item, tuple) else None)
+        df["ExchangeName"] = parsed.apply(lambda item: item[1] if isinstance(item, tuple) else None)
+        df["ExchangeCode"] = None
+        df["CountryCode"] = "USA"
+        df["AssetState"] = None
+        df["PermID"] = df.get("IssuerOAPermID")
+        df["Isin"] = df.get("IssueISIN")
+        frames.append(
+            df[
+                [
+                    "lseg_cusip9",
+                    "lseg_cusip8",
+                    "RIC",
+                    "Isin",
+                    "PermID",
+                    "TickerSymbol",
+                    "CommonName",
+                    "ExchangeCode",
+                    "ExchangeName",
+                    "CountryCode",
+                    "AssetState",
+                ]
+            ].copy()
+        )
+
+    if not frames:
+        raise RuntimeError("LSEG CUSIP conversion returned no rows")
+
+    return pd.concat(frames, ignore_index=True).drop_duplicates(subset=["lseg_cusip9", "RIC"])
 
 
 def first_non_null(series: pd.Series):
@@ -310,7 +391,7 @@ def main() -> None:
     print("=" * 80)
     print(f"CRSP input:   {args.crsp_input}")
     print(f"Output dir:   {output_dir}")
-    print(f"Search top:   {args.search_top}")
+    print(f"Batch size:   {args.convert_batch_size}")
     if args.history_limit is not None:
         print(f"History cap:  {args.history_limit}")
     print()
@@ -318,13 +399,14 @@ def main() -> None:
     crsp_df = load_crsp_snapshot(args.crsp_input)
     print(f"Loaded CRSP rows: {len(crsp_df):,}")
     print(f"Rows with cusip8: {(crsp_df['crsp_cusip8'].notna()).sum():,}")
+    print(f"Rows with cusip9: {(crsp_df['crsp_cusip9'].notna()).sum():,}")
 
     session, config_path = open_session(output_dir)
     rest = LSEGRestClient(session)
 
     try:
-        lseg_df = fetch_lseg_us_equity_universe(rest, args.search_top)
-        print(f"LSEG US ordinary-share rows: {len(lseg_df):,}")
+        lseg_df = fetch_lseg_us_equity_universe(crsp_df, args.convert_batch_size)
+        print(f"LSEG mapped rows: {len(lseg_df):,}")
         lseg_df.to_csv(os.path.join(output_dir, RAW_UNIVERSE_CSV), index=False)
 
         snapshot_df, unmatched_df = build_snapshot(crsp_df, lseg_df)
