@@ -109,6 +109,12 @@ Outputs:
 - `div_distribution_data/us_crsp_split_events.csv`
 - `div_distribution_data/us_crsp_adjustment_summary.csv`
 
+Current build result:
+
+- `3,716` CRSP-mapped stock identities in the name universe
+- `194,439` CRSP event rows
+- `7,842` split / adjustment rows
+
 Important fields in `us_crsp_distribution_events.csv`:
 
 - `permno`
@@ -171,6 +177,13 @@ Outputs:
 - `div_distribution_data/crsp_vs_lseg_distribution_compare.csv`
 - `div_distribution_data/crsp_vs_lseg_distribution_coverage_summary.csv`
 
+Current complete-universe LSEG build result:
+
+- `163,991` LSEG event rows
+- `2,456` stock identities with at least one LSEG event
+- `1,840` stock identities with no LSEG event rows
+- `0` access-key failures in the current build
+
 Important fields in `complete_lseg_distribution_events.csv`:
 
 - `resolved_lseg_instrument`
@@ -213,6 +226,14 @@ Comparison sequencing:
 - step 3: build `crsp_vs_lseg_distribution_compare.csv` only on the overlap set
   where `permno` exists
 
+Current CRSP-vs-LSEG comparison result:
+
+- `189,558` compare rows
+- `131,910` rows present in both CRSP and LSEG
+- `51,815` rows present only in CRSP
+- `5,833` rows present only in LSEG
+- `104,450` rows matched on ex-date, gross amount, and pay date
+
 Important comparison fields:
 
 - `ex_date_status`
@@ -229,6 +250,13 @@ Important comparison fields:
 - `lseg_pay_date_before_ex_date_rows`
 - `lseg_suspicious_event_rows`
 - `lseg_has_suspicious_event`
+
+Current LSEG quality caveat:
+
+- `3,374` zero-amount LSEG rows
+- `28,754` LSEG rows with pay date earlier than ex-date
+- `30,032` LSEG rows flagged as suspicious overall
+- `21,008` comparison rows carry at least one suspicious LSEG event
 
 ## Current Interpretation
 
